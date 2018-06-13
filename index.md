@@ -94,7 +94,7 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 <br/>
 <br/>
-<h4 style="color:red;">Trajectory 6 (failed)</h4>
+<h4>Trajectory 6 (failed)</h4>
 <img src="gifs/bag6.gif" alt="Trj6" width="600px"/>
 <br/>
 
