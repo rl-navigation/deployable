@@ -2,74 +2,110 @@ Training behavior policies with model-free reinforcement learning algorithms cur
 
 This project page presents the code and data required to reproduce the results from "Learning Deployable Navigation Policies at Kilometer Scale from a Single Traversal", and apply the approach to other datasets and robots.
 
+
+
+
 <center>
 
-![CampusMap](plots/campus_map_graph_cropped_robot_buildings_inset.png)
 
-### Entire Dataset ###
-![EntireDatasetGif](gifs/dataset.gif)
+
+
+<img src="plots/campus_map_graph_cropped_robot_buildings_inset.png" alt="CampusMap"/>
+
+
+
+
+<h3>Entire Dataset</h3>
 
 This animation shows one frame for each of the 2099 discrete locations in the dataset.
 
+<img src="gifs/dataset.gif" alt="EntireDatasetGif"/>
 
-### Experiment Videos ###
+
+
+
+
+<h3>Experiment Videos</h3>
 
 The following animations show one in every 60 frames of the deployment trajectories. This equates to approximately one frame per meter at maximum driving speed.
 
-#### Trajectory 1 (successful) ####
-![Gif1](gifs/bag1.gif)
+<h4>Trajectory 1 (successful)</h4>
+<img src="gifs/bag1.gif" alt="Trj1"/>
 
 <img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
 
-#### Trajectory 2 (successful) ####
-![Gif2](gifs/bag2.gif)
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
 
-#### Trajectory 3 (successful) ####
-![Gif3](gifs/bag3.gif)
+<h4>Trajectory 2 (successful)</h4>
+<img src="gifs/bag2.gif" alt="Trj2"/>
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
+<img src="plots/trajectory_1.png" alt="Trj2" width=200px/>
 
-#### Trajectory 4 (successful) ####
-![Gif4](gifs/bag4.gif)
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
 
-#### Trajectory 5 (successful) ####
-![Gif5](gifs/bag5.gif)
+<h4>Trajectory 3 (successful)</h4>
+<img src="gifs/bag3.gif" alt="Trj3"/>
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
+<img src="plots/trajectory_2.png" alt="Trj3" width=200px/>
 
-#### Trajectory 6 (failed) ####
-![Gif6](gifs/bag6.gif)
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
 
-#### Trajectory 7 (successful) ####
-![Gif8](gifs/bag8.gif)
+<h4>Trajectory 4 (successful)</h4>
+<img src="gifs/bag4.gif" alt="Trj4"/>
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
+<img src="plots/trajectory_3.png" alt="Trj4" width=200px/>
 
-#### Trajectory 8 (successful) ####
-![Gif9](gifs/bag9.gif)
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
 
-#### Trajectory 9 (successful) ####
-![GifA](gifs/bagA.gif)
+<h4>Trajectory 5 (successful)</h4>
+<img src="gifs/bag5.gif" alt="Trj5"/>
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
+<img src="plots/trajectory_4.png" alt="Trj5" width=200px/>
 
-#### Trajectory 10 (successful) ####
-![GifD](gifs/bagD.gif)
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
 
-#### Trajectory 11 (successful) ####
-![GifF](gifs/bagF.gif)
+<h4>Trajectory 6 (failed)</h4>
+<img src="gifs/bag6.gif" alt="Trj6"/>
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
+<img src="plots/trajectory_5.png" alt="Trj6" width=200px/>
+
+
+
+<h4>Trajectory 7 (successful)</h4>
+<img src="gifs/bag8.gif" alt="Trj7"/>
+
+<img src="plots/trajectory_6.png" alt="Trj7" width=200px/>
+
+
+
+<h4>Trajectory 8 (successful)</h4>
+<img src="gifs/bag9.gif" alt="Trj8"/>
+
+<img src="plots/trajectory_7.png" alt="Trj8" width=200px/>
+
+
+
+<h4>Trajectory 9 (successful)</h4>
+<img src="gifs/bagA.gif" alt="Trj9"/>
+
+<img src="plots/trajectory_8.png" alt="Trj9" width=200px/>
+
+
+
+<h4>Trajectory 10 (successful)</h4>
+<img src="gifs/bagD.gif" alt="Trj10"/>
+
+<img src="plots/trajectory_9.png" alt="Trj10" width=200px/>
+
+
+
+<h4>Trajectory 11 (successful)</h4>
+<img src="gifs/bagF.gif" alt="Trj11"/>
+
+<img src="plots/trajectory_10.png" alt="Trj11" width=200px/>
+
+
+
 
 <center>
 
