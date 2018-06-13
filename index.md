@@ -44,6 +44,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 2 (successful)</h4>
 <img src="gifs/bag2.gif" alt="Trj2" width="600px"/>
 <br/>
@@ -54,6 +56,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 3 (successful)</h4>
 <img src="gifs/bag3.gif" alt="Trj3" width="600px"/>
 <br/>
@@ -64,6 +68,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 4 (successful)</h4>
 <img src="gifs/bag4.gif" alt="Trj4" width="600px"/>
 <br/>
@@ -74,6 +80,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 5 (successful)</h4>
 <img src="gifs/bag5.gif" alt="Trj5" width="600px"/>
 <br/>
@@ -84,7 +92,9 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
-<h4>Trajectory 6 (failed)</h4>
+<br/>
+<br/>
+<h4>Trajectory 6 (<p style="color:red;">failed</p>)</h4>
 <img src="gifs/bag6.gif" alt="Trj6" width="600px"/>
 <br/>
 
@@ -94,6 +104,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 7 (successful)</h4>
 <img src="gifs/bag8.gif" alt="Trj7" width="600px"/>
 <br/>
@@ -104,6 +116,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 8 (successful)</h4>
 <img src="gifs/bag9.gif" alt="Trj8" width="600px"/>
 <br/>
@@ -114,6 +128,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 9 (successful)</h4>
 <img src="gifs/bagA.gif" alt="Trj9" width="600px"/>
 <br/>
@@ -124,6 +140,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 10 (successful)</h4>
 <img src="gifs/bagD.gif" alt="Trj10" width="600px"/>
 <br/>
@@ -134,6 +152,8 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
+<br/>
+<br/>
 <h4>Trajectory 11 (successful)</h4>
 <img src="gifs/bagF.gif" alt="Trj11" width="600px"/>
 <br/>
