@@ -1,44 +1,39 @@
-## Welcome to GitHub Pages
+Training behavior policies with odel-free reinforcement learning algorithms currently require a larges amount of interaction with the environment of the agent in order to reach competence at challenging tasks, often far more interaction than would be practical on a real robot in real time. In addition, photorealistic simulations of specific environments can be hard to come by. For these reasons, we propose learning as much as possible directly from real recorded data.
 
-You can use the [editor on
-GitHub](https://github.com/rl-navigation/deployable/edit/master/index.md) to
-maintain and preview the content for your website in Markdown files.
+This project page presents the code and data required to reproduce the results from "Learning Deployable Navigation Policies at Kilometer Scale from a Single Traversal", and apply the approach to other datasets and robots.
 
-Whenever you commit to this repository, GitHub Pages will run
-[Jekyll](https://jekyllrb.com/) to rebuild the pages in your site, from the
-content in your Markdown files.
+![CampusMap](plots/campus_map_graph_cropped_robot_buildings_inset.png)
 
-### Markdown
+![EntireDatasetGif](plots/dataset.gif)
 
-Markdown is a lightweight and easy-to-use syntax for styling your writing. It
-includes conventions for
+![Gif1](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-08-17-02.bag.gif)
 
-```markdown Syntax highlighted code block
+![Gif2](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-08-32-52.bag.gif)
 
-# Header 1 ## Header 2 ### Header 3
+![Gif3](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-08-42-41.bag.gif)
 
-- Bulleted
-- List
+![Gif4](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-08-58-48.bag.gif)
 
-1. Numbered
-2. List
+![Gif5](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-09-06-53.bag.gif)
 
-**Bold** and _Italic_ and `Code` text
+![Gif6](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-09-14-57.bag.gif)
 
-[Link](url) and ![Image](src) ```
+![Gif7](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-09-41-56.bag.gif)
 
-For more details see [GitHub Flavored
-Markdown](https://guides.github.com/features/mastering-markdown/).
+![Gif8](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-12-22-32.bag.gif)
 
-### Jekyll Themes
+![Gif9](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-12-37-29.bag.gif)
 
-Your Pages site will use the layout and styles from the Jekyll theme you have
-selected in your [repository
-settings](https://github.com/rl-navigation/deployable/settings). The name of
-this theme is saved in the Jekyll `_config.yml` configuration file.
+![GifA](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-12-49-54.bag.gif)
 
-### Support or Contact
+![GifB](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-13-03-16.bag.gif)
 
-Having trouble with Pages? Check out our
-[documentation](https://help.github.com/categories/github-pages-basics/) or
-[contact support](https://github.com/contact) and we’ll help you sort it out.
+![GifC](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-14-40-45.bag.gif)
+
+![GifD](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-14-43-33.bag.gif)
+
+![GifE](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-14-56-47.bag.gif)
+
+![GifF](gifs/_media_jake_vault_datasets_qut-pioneer_RLExperiment_2018-06-09-15-04-52.bag.gif)
+
+
