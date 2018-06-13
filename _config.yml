@@ -1,1 +1,5 @@
 theme: jekyll-theme-cayman
+
+title: Deployable Navigation Policies
+
+description: Code and data accompanying "Learning Deployable Navigation Policies at Kilometer Scale from a Single Traversal"
