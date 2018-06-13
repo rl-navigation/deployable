@@ -20,7 +20,7 @@ This project page presents the code and data required to reproduce the results f
 This animation shows one frame for each of the 2099 discrete locations in the dataset.
 <br/>
 
-<img src="gifs/dataset.gif" alt="EntireDatasetGif"/>
+<img src="gifs/dataset.gif" alt="EntireDatasetGif" width="600px"/>
 
 
 
