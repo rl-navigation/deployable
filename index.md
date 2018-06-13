@@ -18,6 +18,7 @@ This project page presents the code and data required to reproduce the results f
 <h3>Entire Dataset</h3>
 
 This animation shows one frame for each of the 2099 discrete locations in the dataset.
+<br/>
 
 <img src="gifs/dataset.gif" alt="EntireDatasetGif"/>
 
@@ -32,77 +33,77 @@ The following animations show one in every 60 frames of the deployment trajector
 <h4>Trajectory 1 (successful)</h4>
 <img src="gifs/bag1.gif" alt="Trj1"/>
 
-<img src="plots/trajectory_0.png" alt="Trj1" width=200px/>
+<img src="plots/trajectory_0.png" alt="Trj1" width="200px"/>
 
 
 
 <h4>Trajectory 2 (successful)</h4>
 <img src="gifs/bag2.gif" alt="Trj2"/>
 
-<img src="plots/trajectory_1.png" alt="Trj2" width=200px/>
+<img src="plots/trajectory_1.png" alt="Trj2" width="200px"/>
 
 
 
 <h4>Trajectory 3 (successful)</h4>
 <img src="gifs/bag3.gif" alt="Trj3"/>
 
-<img src="plots/trajectory_2.png" alt="Trj3" width=200px/>
+<img src="plots/trajectory_2.png" alt="Trj3" width="200px"/>
 
 
 
 <h4>Trajectory 4 (successful)</h4>
 <img src="gifs/bag4.gif" alt="Trj4"/>
 
-<img src="plots/trajectory_3.png" alt="Trj4" width=200px/>
+<img src="plots/trajectory_3.png" alt="Trj4" width="200px"/>
 
 
 
 <h4>Trajectory 5 (successful)</h4>
 <img src="gifs/bag5.gif" alt="Trj5"/>
 
-<img src="plots/trajectory_4.png" alt="Trj5" width=200px/>
+<img src="plots/trajectory_4.png" alt="Trj5" width="200px"/>
 
 
 
 <h4>Trajectory 6 (failed)</h4>
 <img src="gifs/bag6.gif" alt="Trj6"/>
 
-<img src="plots/trajectory_5.png" alt="Trj6" width=200px/>
+<img src="plots/trajectory_5.png" alt="Trj6" width="200px"/>
 
 
 
 <h4>Trajectory 7 (successful)</h4>
 <img src="gifs/bag8.gif" alt="Trj7"/>
 
-<img src="plots/trajectory_6.png" alt="Trj7" width=200px/>
+<img src="plots/trajectory_6.png" alt="Trj7" width="200px"/>
 
 
 
 <h4>Trajectory 8 (successful)</h4>
 <img src="gifs/bag9.gif" alt="Trj8"/>
 
-<img src="plots/trajectory_7.png" alt="Trj8" width=200px/>
+<img src="plots/trajectory_7.png" alt="Trj8" width="200px"/>
 
 
 
 <h4>Trajectory 9 (successful)</h4>
 <img src="gifs/bagA.gif" alt="Trj9"/>
 
-<img src="plots/trajectory_8.png" alt="Trj9" width=200px/>
+<img src="plots/trajectory_8.png" alt="Trj9" width="200px"/>
 
 
 
 <h4>Trajectory 10 (successful)</h4>
 <img src="gifs/bagD.gif" alt="Trj10"/>
 
-<img src="plots/trajectory_9.png" alt="Trj10" width=200px/>
+<img src="plots/trajectory_9.png" alt="Trj10" width="200px"/>
 
 
 
 <h4>Trajectory 11 (successful)</h4>
 <img src="gifs/bagF.gif" alt="Trj11"/>
 
-<img src="plots/trajectory_10.png" alt="Trj11" width=200px/>
+<img src="plots/trajectory_10.png" alt="Trj11" width="200px"/>
 
 
 
