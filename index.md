@@ -1,6 +1,8 @@
 Training model-free reinforcement learning algorithms currently requires a very large amount of agent interaction to solve challenging tasks, often far more interaction than would be practical on a robot in real time. In addition, photorealistic simulations of specific environments can be hard to come by. For these reasons, we propose learning as much as possible directly from real recorded data.
 
-This project page presents the code and data required to reproduce the results from "Learning Deployable Navigation Policies at Kilometer Scale from a Single Traversal", and apply the approach to other datasets and robots.
+This project page presents visualisations of the results presented in the paper, and provides the <a href="https://github.com/rl-navigation/deployable/tree/master/src"/>code</a> and <a href="https://github.com/rl-navigation/deployable/tree/master/data"/>data</a> required to reproduce the results from "Learning Deployable Navigation Policies at Kilometer Scale from a Single Traversal", and apply the approach to other datasets and robots.
+
+
 
 
 
@@ -15,7 +17,7 @@ This project page presents the code and data required to reproduce the results f
 
 
 
-<h3>Entire Dataset</h3>
+<h2>Entire Dataset</h2>
 
 This animation shows one frame for each of the 2099 discrete locations in the dataset.
 <br/>
@@ -27,7 +29,7 @@ This animation shows one frame for each of the 2099 discrete locations in the da
 
 
 
-<h3>Experiment Videos</h3>
+<h2>Experiment Videos</h2>
 
 </center>
 The following animations show one in every 60 frames of the deployment trajectories. This equates to approximately one frame per meter at maximum driving speed.
@@ -168,7 +170,7 @@ Below each animation is a plot of the trajectory taken at deployment time compar
 
 
 
-<h3>Video of Trained Agent</h3>
+<h2>Video of Trained Agent</h2>
 
 The following video shows the trained agent navigating in recorded data with a gradually increasing curriculum.
 
