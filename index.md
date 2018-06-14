@@ -1,6 +1,18 @@
-Training model-free reinforcement learning algorithms currently requires a very large amount of agent interaction to solve challenging tasks, often far more interaction than would be practical on a robot in real time. In addition, photorealistic simulations of specific environments can be hard to come by. For these reasons, we propose learning as much as possible directly from real recorded data.
+Training model-free reinforcement learning algorithms currently requires a very
+large amount of agent interaction to solve challenging tasks, often far more
+interaction than would be practical on a robot in real time. In addition,
+photorealistic simulations of specific environments can be hard to come by. For
+these reasons, we propose learning as much as possible directly from real
+recorded data.
 
-This project page presents visualisations of the results presented in the paper, and provides the <a href="https://github.com/rl-navigation/deployable/tree/master/src"/>code</a> and <a href="https://github.com/rl-navigation/deployable/tree/master/data"/>data</a> required to reproduce the results from "Learning Deployable Navigation Policies at Kilometer Scale from a Single Traversal", and apply the approach to other datasets and robots.
+This project page presents visualisations of the results presented in the
+paper, and provides the
+<a href="https://github.com/rl-navigation/deployable/tree/master/src">code</a>
+and
+<a href="https://github.com/rl-navigation/deployable/tree/master/data">data</a>
+required to reproduce the results from "Learning Deployable Navigation Policies
+at Kilometer Scale from a Single Traversal", and apply the approach to other
+datasets and robots.
 
 
 
