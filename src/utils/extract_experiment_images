@@ -1,0 +1,76 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision, rospy, rosbag, base64
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg    import String
+
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.dont_write_bytecode = True
+from graph_env  import *
+from policies   import *
+from load_graph import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--datafile", "", "Graph file so we can get unwrapping parameters")
+arg("--bagfile",  "", "ROS bag file containing the recording of the experiment")
+argvalidate()
+from args import *
+
+#==============================================================================
+# LOAD ENVIRONMENT
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = 128,
+               shifts          = 0,
+               shift_radians   = 0,
+               stride          = 3,
+               vision_init     = "places365",
+               workers         = 1,
+               noise_sigma     = 0.0,
+               noise_theta     = 0.0,
+               stutter_prob    = 0.0,
+               curr_levels     = 1,
+               curr_upd_int    = 1000,
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = 1,
+               bump_penalty    = 0,
+               elevator_radius = 1)
+
+#==============================================================================
+# RUN
+
+img_dir = "graph_imgs/{}".format(BAGFILE.replace("/","_"))
+if not os.path.exists(img_dir): os.mkdir(img_dir)
+
+unwrapping_parameters = env.graph["unwrapping_parameters"]
+
+frame_num = 0
+
+print("Reading experiment from bagfile...")
+for topic, msg, t in rosbag.Bag(BAGFILE).read_messages():
+    if topic == "/nav_agent/gol":
+        pass
+
+    if topic == "/nav_agent/obs":
+        pass
+
+    if topic == "/nav_agent/act":
+        pass
+
+    if topic == "/nav_agent/prb":
+        pass
+
+    if topic == "/firecam/image_raw/compressed":
+        if frame_num % 60 == 0:
+            img = cv2.imdecode(np.fromstring(msg.data, np.uint8), cv2.IMREAD_COLOR)
+            img = polar_to_cartesian(img, theta=0, **unwrapping_parameters)
+            filename = os.path.join(img_dir, "{}.png".format(t))
+            cv2.imwrite(filename, img)
+        frame_num += 1
+

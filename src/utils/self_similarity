@@ -1,0 +1,65 @@
+#! /usr/bin/env python2
+
+"""
+This script computes confusion matrices for the three different types of visual preprocessing across the dataset.
+"""
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision
+from scipy import spatial
+
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.dont_write_bytecode = True
+from graph_env import *
+from policies  import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--headless",       None,          "Save images only, don't render in a window")
+arg("--vision_batch",   256,           "Batch size to use when preprocessing images; lower numbers use less VRAM")
+arg("--shifts",         5,             "Number of different rotations for stochastic observations")
+arg("--shift_radians",  0.07,          "Number of radians to rotate the image for each shift increment")
+arg("--stride",         3,             "Stride of pooling in vision; 1 is full overlap, 3 is 1/2 overlap, 7 is no overlap")
+arg("--vision_init",    "places365",   "Initialization for vision network: imagenet, places365, or untrained")
+arg("--datafile",       "",            "Pytorch file containing the navigation graph")
+argvalidate()
+from args import *
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = VISION_BATCH,
+               shifts          = SHIFTS,
+               shift_radians   = SHIFT_RADIANS,
+               stride          = STRIDE,
+               vision_init     = VISION_INIT,
+               workers         = 1,
+               noise_sigma     = 0,
+               noise_theta     = 0,
+               stutter_prob    = 0,
+               curr_levels     = 1,
+               curr_upd_int    = 100000,
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = -1,
+               bump_penalty    = 0,
+               elevator_radius = 1)
+
+#==============================================================================
+# RUN
+
+if not os.path.exists("plots"): os.mkdir("plots")
+
+obs = env.observations[::16*4]
+
+dists = spatial.distance.cdist(obs,obs,metric="minkowski",p=1)
+
+dists = (dists-dists.min())/(dists.max()-dists.min()+1e-8)
+dist_img = (dists*255).astype(np.uint8)
+
+cv2.imwrite("plots/confusion_sad_{}.png".format(VISION_INIT), dist_img)
+

@@ -1,0 +1,634 @@
+#! /usr/bin/env python2
+
+"""
+I feel the need to apologize for this script. It's very gross, but it does the job of allowing
+users to create navigable graph environments from ROS bag files. Maybe in a hypothetical future
+I'll refactor it.
+"""
+
+from __future__ import print_function, division
+import rosbag, numpy as np, cv2, sys, collections, time, os, palettable, warnings, math, torch
+sys.dont_write_bytecode = True
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+import transformations as tf
+from status import StatusLine
+
+
+#==============================================================================
+# PARAMS
+#==============================================================================
+
+# unwrapping parameters
+CROP_VERT = [ 26,471]
+CROP_HORZ = [119,567]
+CROP_UNWT = 11
+CROP_UNWB = 41
+THETA     = 0.0 # rotate image before unwrapping
+
+# segment range
+TMN  = 1e28
+TMX  = -1e28
+DSEP = 1.0
+
+# GUI variables
+X = 0
+Y = 0
+LCLICK = False
+MODE       = 0
+MODES      = ["create_segments", "connect_nodes"]
+EDGE_MODE  = 0
+EDGE_MODES = ["local", "nonlocal"]
+
+# GUI parameters
+MIN_DIST = 80
+H = 2000
+W = 2000
+B = 50
+INFLATE = 5
+
+from palettable.cartocolors.qualitative import Vivid_10, Bold_10, Pastel_10, Prism_10, Safe_10
+COLORS = [tuple(c) for c in Vivid_10.colors + Bold_10.colors + Pastel_10.colors + Prism_10.colors + Safe_10.colors]
+
+
+#==============================================================================
+# TYPES
+#==============================================================================
+
+
+Node = collections.namedtuple("Node", ("id", "stamp", "pose", "frame", "scan"))
+
+
+#==============================================================================
+# STATE
+#==============================================================================
+
+
+def reset_mode_state():
+    global BAG_SEGMENT_ENDPOINT, WS_SELECTED_SEGMENT, WS_SELECTED_NODE
+    BAG_SEGMENT_ENDPOINT = None
+    WS_SELECTED_SEGMENT  = None
+    WS_SELECTED_NODE     = None
+
+
+#==============================================================================
+# VIZ
+#==============================================================================
+
+_IMG_SHAPE = None
+
+WS_EDGES = []; WS_SEGMENTS = []; in_view = None; DIRTY = True; BAG_SEGMENT_ENDPOINT = None; WS_SELECTED_SEGMENT = None; WS_SELECTED_NODE = None
+def viz(nodes, t_min, t_max, d_sep):
+    global in_view, DIRTY, LCLICK, BAG_SEGMENT_ENDPOINT, MODE, WS_SELECTED_SEGMENT, WS_SELECTED_NODE
+    global WS_SEGMENTS, WS_EDGES, EDGE_MODE
+    global CROP_VERT, CROP_HORZ, CROP_UNWT, CROP_UNWB, THETA
+    global _IMG_SHAPE, INFLATE
+
+    if DIRTY or in_view is None:
+        in_view = []; prev_xy = None
+        for node in nodes:
+            id, stamp, pose, frame, scan = node
+            if stamp >= t_min and stamp <= t_max:
+                if prev_xy is None or np.linalg.norm(np.array(pose[0:2])-np.array(prev_xy)) > d_sep:
+                    prev_xy = pose[0:2]
+                    in_view.append(node)
+        DIRTY = False
+
+
+    bag_img   = np.full((H,W,3), 255, np.uint8)
+    ws_img    = np.full((H,W,3), 225, np.uint8)
+    frame_img = None
+    selected_frame_img = None
+
+
+    selected_node = None
+    if len(in_view) > 1:
+        poses = np.array([node.pose[0:2] for node in in_view])
+        xmn = poses[:,0].min(); xmx = poses[:,0].max(); xgp = xmx-xmn
+        ymn = poses[:,1].min(); ymx = poses[:,1].max(); ygp = ymx-ymn
+        if   xgp > ygp: ymn -= (xgp-ygp)/2; ymx += (xgp-ygp)/2
+        elif xgp < ygp: xmn -= (ygp-xgp)/2; xmx += (ygp-xgp)/2
+        def topix  (x,y): return (int((x-xmn)/(xmx-xmn+1e-8)*(W-2*B)+B), H-int((y-ymn)/(ymx-ymn+1e-8)*(H-2*B)+B))
+        def toworld(x,y): return (x-B)/(W-2.0*B)*(xmx-xmn)+xmn, (H-y-B)/(H-2.0*B)*(ymx-ymn)+ymn
+
+
+        cv2.circle(bag_img, topix(*in_view[ 0].pose[0:2]), 4*INFLATE, (0,255,0), 2)
+        cv2.circle(bag_img, topix(*in_view[-1].pose[0:2]), 4*INFLATE, (0,0,255), 2)
+
+
+        if MOUSE_WINDOW == "bag":
+            pix_in_view = np.array([topix(*node.pose[0:2]) for node in in_view])
+            mouse = (X,Y)
+            dists = np.linalg.norm(pix_in_view - mouse, axis=1)
+            closest_idx = np.argmin(dists)
+            if dists[closest_idx] < MIN_DIST:
+                selected_node = in_view[closest_idx]
+                cv2.circle(bag_img, topix(*in_view[closest_idx].pose[0:2]), 4*INFLATE, (255,0,0), 2)
+                frame_img = cv2.imdecode(in_view[closest_idx].frame, cv2.IMREAD_COLOR)
+                frame_img = polar_to_cartesian(frame_img)
+                #frame_img = cv2.resize(frame_img, dsize=(W,H//2))
+
+
+        segment = None
+        if BAG_SEGMENT_ENDPOINT is not None:
+            cv2.circle(bag_img, topix(*BAG_SEGMENT_ENDPOINT.pose[0:2]), 4*INFLATE, (0,64,0), -1)
+            if selected_node is not None:
+                if selected_node.stamp > BAG_SEGMENT_ENDPOINT.stamp: t1 = BAG_SEGMENT_ENDPOINT.stamp; t2 = selected_node.stamp
+                else: t2 = BAG_SEGMENT_ENDPOINT.stamp; t1 = selected_node.stamp
+                segment = [node for node in in_view if node.stamp>=t1 and node.stamp<=t2]
+                for i in range(len(segment)-1):
+                    cv2.line(bag_img, topix(*segment[i].pose[0:2]), topix(*segment[i+1].pose[0:2]), (0,64,0), 4*INFLATE)
+
+
+        for i, (id, stamp, pose, frame, scan) in enumerate(in_view):
+            color = (int((np.cos(float(i)/len(in_view)*2*np.pi)/2+0.5)*255),
+                     int((np.sin(float(i)/len(in_view)*4*np.pi)/2+0.5)*255),
+                     int(float(i) /len(in_view)*255))
+            cv2.circle(bag_img, topix(*pose[0:2]), 1*INFLATE, (255,0,0), -1)
+
+
+    ws_highlighted_segment = None
+    ws_highlighted_node    = None
+    num_ws_nodes = sum([len(seg) for origin,cluster,seg in WS_SEGMENTS])
+    if num_ws_nodes > 1:
+        ws_nodes = []
+        for segid,(origin,cluster,seg) in enumerate(WS_SEGMENTS): ws_nodes.extend([[origin,cluster,segid,node] for node in seg])
+
+        def transform_pose(pose, origin):
+            x,y = pose[0:2]
+            dx,dy,dtheta = origin
+            xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+            yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+            x = xr + dx
+            y = yr + dy
+            return [x,y]
+
+        ws_poses = np.array([transform_pose(node.pose, origin) for origin,cluster,segid,node in ws_nodes])
+        ws_xmn = ws_poses[:,0].min(); ws_xmx = ws_poses[:,0].max(); ws_xgp = ws_xmx-ws_xmn
+        ws_ymn = ws_poses[:,1].min(); ws_ymx = ws_poses[:,1].max(); ws_ygp = ws_ymx-ws_ymn
+        if   ws_xgp > ws_ygp: ws_ymn -= (ws_xgp-ws_ygp)/2; ws_ymx += (ws_xgp-ws_ygp)/2
+        elif ws_xgp < ws_ygp: ws_xmn -= (ws_ygp-ws_xgp)/2; ws_xmx += (ws_ygp-ws_xgp)/2
+
+        def ws_topix(pose,origin):
+            x,y = transform_pose(pose, origin)
+            return (int((x-ws_xmn)/(ws_xmx-ws_xmn+1e-8)*(W-2*B)+B), H-int((y-ws_ymn)/(ws_ymx-ws_ymn+1e-8)*(H-2*B)+B))
+
+        def ws_toworld(x,y): return (x-B)/(W-2.0*B)*(ws_xmx-ws_xmn)+ws_xmn, (H-y-B)/(H-2.0*B)*(ws_ymx-ws_ymn)+ws_ymn
+
+
+        if len(WS_SEGMENTS) > 0:
+            for origin, cluster, seg in WS_SEGMENTS:
+                for node in seg: cv2.circle(ws_img, ws_topix(node.pose, origin), 4*INFLATE, (64,64,0), 2)
+
+
+        if MODES[MODE] == "create_segments":
+            if MOUSE_WINDOW == "ws":
+                if WS_SELECTED_SEGMENT is None:
+                    pix_in_view = np.array([ws_topix(node.pose, origin) for origin,cluster,segid,node in ws_nodes])
+                    mouse = (X,Y)
+                    dists = np.linalg.norm(pix_in_view-mouse, axis=1)
+                    closest_idx = np.argmin(dists)
+                    if dists[closest_idx] < MIN_DIST:
+                        origin,cluster,segid,node = ws_nodes[closest_idx]
+                        cv2.circle(ws_img, ws_topix(node.pose, origin), 4*INFLATE, (0,0,0), 2)
+                        frame_img = cv2.imdecode(node.frame, cv2.IMREAD_COLOR)
+                        frame_img = polar_to_cartesian(frame_img)
+                        #frame_img = cv2.resize(frame_img, dsize=(W,H//2))
+                        ws_highlighted_segment = segid
+
+
+
+            if WS_SELECTED_SEGMENT is None and ws_highlighted_segment is not None:
+                origin,cluster,seg = WS_SEGMENTS[ws_highlighted_segment]
+                for node in seg: cv2.circle(ws_img, ws_topix(node.pose, origin), 6*INFLATE, (0,128,255), 2)
+
+
+            if WS_SELECTED_SEGMENT is not None:
+                origin,cluster,seg = WS_SEGMENTS[WS_SELECTED_SEGMENT]
+                for node in seg: cv2.circle(ws_img, ws_topix(node.pose, origin), 5*INFLATE, (0,64,128), 2)
+
+
+        for f,t,em in WS_EDGES:
+            from_origin,from_cluster,from_segid,from_node = f
+            to_origin,to_cluster,to_segid,to_node = t
+            color = (64,64,64) if em == "local" else (255,64,64)
+            cv2.line(ws_img, ws_topix(from_node.pose, from_origin), ws_topix(to_node.pose, to_origin), color, 1*INFLATE)
+
+
+
+        if MODES[MODE] == "connect_nodes":
+            if MOUSE_WINDOW == "ws":
+                pix_in_view = np.array([ws_topix(node.pose, origin) for origin,cluster,segid,node in ws_nodes])
+                mouse = (X,Y)
+                dists = np.linalg.norm(pix_in_view-mouse, axis=1)
+                closest_idx = np.argmin(dists)
+                if dists[closest_idx] < MIN_DIST:
+                    origin,cluster,segid,node = ws_nodes[closest_idx]
+                    color = (0,0,0)
+                    seg = WS_SEGMENTS[segid][2]
+                    node_is_end = seg[0] == node or seg[-1] == node
+                    if node_is_end: color = (0,255,0)
+                    cv2.circle(ws_img, ws_topix(node.pose, origin), 8*INFLATE, color, 4)
+                    frame_img = cv2.imdecode(node.frame, cv2.IMREAD_COLOR)
+                    frame_img = polar_to_cartesian(frame_img)
+                    #frame_img = cv2.resize(frame_img, dsize=(W,H//2))
+                    ws_highlighted_node = closest_idx
+
+                if WS_SELECTED_NODE is not None and ws_highlighted_node is not None:
+                    fr_origin,fr_cluster,fr_segid,fr_node = ws_nodes[WS_SELECTED_NODE]
+                    to_origin,to_cluster,to_segid,to_node = ws_nodes[ws_highlighted_node]
+                    color = (0,0,255)
+                    to_seg = WS_SEGMENTS[to_segid][2]
+                    fr_seg = WS_SEGMENTS[fr_segid][2]
+                    to_node_is_end = to_seg[0] == to_node or to_seg[-1] == to_node
+                    fr_node_is_end = fr_seg[0] == fr_node or fr_seg[-1] == fr_node
+                    if int(to_node_is_end) + int(fr_node_is_end) == 1: color = (0,128,255)
+                    if int(to_node_is_end) + int(fr_node_is_end) == 2: color = (0,255,0)
+                    cv2.line(ws_img, ws_topix(fr_node.pose, fr_origin), ws_topix(to_node.pose, to_origin), color, 3*INFLATE)
+
+
+        for origin,cluster,seg in WS_SEGMENTS:
+            if cluster > 0:
+                color = COLORS[cluster%len(COLORS)]
+                for node in seg: cv2.circle(ws_img, ws_topix(node.pose, origin), 3*INFLATE, color, -1)
+                for i in range(len(seg)-1): cv2.line(ws_img, ws_topix(seg[i].pose, origin), ws_topix(seg[i+1].pose, origin), color, 2*INFLATE)
+            else:
+                for node in seg: cv2.circle(ws_img, ws_topix(node.pose, origin), 1*INFLATE, (0,0,0), -1)
+                for i in range(len(seg)-1): cv2.line(ws_img, ws_topix(seg[i].pose, origin), ws_topix(seg[i+1].pose, origin), (0,0,0), 2*INFLATE)
+
+    if WS_SELECTED_NODE is not None:
+        selected_frame_img = cv2.imdecode(ws_nodes[WS_SELECTED_NODE][3].frame, cv2.IMREAD_COLOR)
+        selected_frame_img = polar_to_cartesian(selected_frame_img)
+        #selected_frame_img = cv2.resize(selected_frame_img, dsize=(W,H//2))
+    elif BAG_SEGMENT_ENDPOINT is not None:
+        selected_frame_img = cv2.imdecode(BAG_SEGMENT_ENDPOINT.frame, cv2.IMREAD_COLOR)
+        selected_frame_img = polar_to_cartesian(selected_frame_img)
+        #selected_frame_img = cv2.resize(selected_frame_img, dsize=(W,H//2))
+
+
+    if LCLICK:
+        if MODES[MODE] == "create_segments":
+            if BAG_SEGMENT_ENDPOINT is None and selected_node is not None:
+                reset_mode_state()
+                BAG_SEGMENT_ENDPOINT = selected_node
+            elif segment is not None:
+                WS_SEGMENTS.append([np.array([0,0,0],np.float32),0,list(segment)])
+                reset_mode_state()
+            if WS_SELECTED_SEGMENT is None and ws_highlighted_segment is not None or WS_SELECTED_SEGMENT is not None and ws_highlighted_segment != WS_SELECTED_SEGMENT:
+                reset_mode_state()
+                WS_SELECTED_SEGMENT = ws_highlighted_segment
+            if ws_highlighted_segment is None and selected_node is None:
+                reset_mode_state()
+        if MODES[MODE] == "connect_nodes":
+            if WS_SELECTED_NODE is None: WS_SELECTED_NODE = ws_highlighted_node
+            elif WS_SELECTED_NODE is not None and ws_highlighted_node is not None:
+                WS_EDGES.append([ws_nodes[WS_SELECTED_NODE], ws_nodes[ws_highlighted_node], EDGE_MODES[EDGE_MODE]])
+                reset_mode_state()
+            else: reset_mode_state()
+
+    LCLICK = False # reset the click event
+
+    if _IMG_SHAPE is None and frame_img          is not None: _IMG_SHAPE = frame_img.shape
+    if _IMG_SHAPE is None and selected_frame_img is not None: _IMG_SHAPE = selected_frame_img.shape
+
+    if frame_img is     None and selected_frame_img is not None: frame_img = np.ones_like(selected_frame_img)*64
+    if frame_img is not None and selected_frame_img is     None: selected_frame_img = np.ones_like(frame_img)*128
+    if frame_img is     None and selected_frame_img is     None: frame_img = np.full(_IMG_SHAPE if _IMG_SHAPE is not None else (H//4,W,3),64,np.uint8); selected_frame_img = frame_img*2
+
+
+    cv2.putText(selected_frame_img, MODES[MODE], (20,50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+
+    if MODES[MODE] == "connect_nodes":
+        color = (200,200,200) if EDGE_MODES[EDGE_MODE] == "local" else (255,64,64)
+        cv2.putText(selected_frame_img, EDGE_MODES[EDGE_MODE], (20,100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    frame_img = np.vstack([selected_frame_img, frame_img])
+    cv2.imshow("bag",   bag_img)
+    cv2.imshow("ws",    ws_img)
+    cv2.imshow("frame", frame_img)
+    key = cv2.waitKey(15) & 0xff
+
+
+    if   key == 27      : print("Please close the window with 'ctrl-c' in the terminal")
+    elif key == ord('m'): MODE = (MODE+1)%len(MODES); reset_mode_state()
+    elif key == ord('n'): EDGE_MODE = (EDGE_MODE+1)%len(EDGE_MODES)
+    elif key == ord('c'): reset_mode_state()
+
+
+    elif key == ord('s') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][0] += [0,-1,0]
+    elif key == ord('w') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][0] += [0,+1,0]
+    elif key == ord('a') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][0] += [-1,0,0]
+    elif key == ord('d') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][0] += [+1,0,0]
+    elif key == ord('q') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][0] += [0,0,-0.05]
+    elif key == ord('e') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][0] += [0,0,+0.05]
+
+
+    elif key == ord('k') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][1] += 1
+    elif key == ord('j') and WS_SELECTED_SEGMENT is not None: WS_SEGMENTS[WS_SELECTED_SEGMENT][1]  = max(0,WS_SEGMENTS[WS_SELECTED_SEGMENT][1]-1)
+
+
+    elif key == ord('t'): CROP_UNWT    += 1; print_unwrapping_parameters()
+    elif key == ord('g'): CROP_UNWT     = max(0, CROP_UNWT-1); print_unwrapping_parameters()
+    elif key == ord('y'): CROP_UNWB    += 1; print_unwrapping_parameters()
+    elif key == ord('h'): CROP_UNWB     = max(0, CROP_UNWB-1); print_unwrapping_parameters()
+    elif key == ord('1'): CROP_HORZ[0]  = max(0, CROP_HORZ[0]-1); print_unwrapping_parameters()
+    elif key == ord('2'): CROP_HORZ[0] += 1; print_unwrapping_parameters()
+    elif key == ord('3'): CROP_HORZ[1]  = max(0, CROP_HORZ[1]-1); print_unwrapping_parameters()
+    elif key == ord('4'): CROP_HORZ[1] += 1; print_unwrapping_parameters()
+    elif key == ord('5'): CROP_VERT[0]  = max(0, CROP_VERT[0]-1); print_unwrapping_parameters()
+    elif key == ord('6'): CROP_VERT[0] += 1; print_unwrapping_parameters()
+    elif key == ord('7'): CROP_VERT[1]  = max(0, CROP_VERT[1]-1); print_unwrapping_parameters()
+    elif key == ord('8'): CROP_VERT[1] += 1; print_unwrapping_parameters()
+    elif key == ord('v'): THETA -= 0.01; print_unwrapping_parameters()
+    elif key == ord('b'): THETA += 0.01; print_unwrapping_parameters()
+
+    elif key == ord('-'): INFLATE = max(1, INFLATE-1)
+    elif key == ord('='): INFLATE = max(1, INFLATE+1)
+
+
+    elif key == ord('x') and WS_SELECTED_SEGMENT is not None:
+        edges = []
+        for f,t,em in WS_EDGES:
+            if f[2] != WS_SELECTED_SEGMENT and t[2] != WS_SELECTED_SEGMENT:
+                edges.append([f,t,em])
+        WS_EDGES = edges
+        del WS_SEGMENTS[WS_SELECTED_SEGMENT]
+        reset_mode_state()
+
+    elif key == ord(' '):
+        cv2.putText(bag_img, "SAVING", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 4)
+        cv2.imshow("bag", bag_img)
+        cv2.waitKey(100)
+        save_graph()
+
+
+#==============================================================================
+# HANDLERS
+#==============================================================================
+
+
+def handle_tmin(val, *args): global DIRTY, TMN;  DIRTY = True; TMN  = TO+val;    reset_mode_state()
+def handle_tmax(val, *args): global DIRTY, TMX;  DIRTY = True; TMX  = TO+val;    reset_mode_state()
+def handle_dsep(val, *args): global DIRTY, DSEP; DIRTY = True; DSEP = val/100.0; reset_mode_state()
+
+
+MOUSE_WINDOW = None
+def handle_mouse_bag(event, x, y, *rest):
+    global X, Y, LCLICK, MOUSE_WINDOW
+    MOUSE_WINDOW = "bag"
+
+    X = x
+    Y = y
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        LCLICK = True
+
+
+def handle_mouse_ws(event, x, y, *rest):
+    global X, Y, LCLICK, MOUSE_WINDOW
+    MOUSE_WINDOW = "ws"
+
+    X = x
+    Y = y
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        LCLICK = True
+
+
+#==============================================================================
+# UNWRAPPING IMAGES
+#==============================================================================
+
+
+
+def print_unwrapping_parameters():
+    print("CROP_HORZ:", CROP_HORZ,
+          "CROP_VERT:", CROP_VERT,
+          "CROP_UNWT:", CROP_UNWT,
+          "CROP_UNWB:", CROP_UNWB,
+          "THETA:",     THETA)
+
+
+def polar_to_cartesian(img):
+    def unwrap(image, center, radius, angle_offset=0, total_angle=2*np.pi):
+        nsamples = int(1.5*image.shape[0]*total_angle/(2*np.pi))
+        samples  = np.linspace(0, total_angle, nsamples)[:-1] + angle_offset
+        angle, magnitude = np.meshgrid(samples, list(reversed(np.arange(radius))))
+        x = magnitude * np.cos(angle) + center[0]
+        y = magnitude * np.sin(angle) + center[1]
+        x, y = cv2.convertMaps(x.astype('float32'), y.astype('float32'), cv2.CV_32FC1)
+        return cv2.remap(image, x, y, cv2.INTER_LINEAR).astype(np.uint8)
+
+    def rotate(img, theta):
+        degrees = theta*180.0/math.pi
+        matrix  = cv2.getRotationMatrix2D((img.shape[1]/2, img.shape[0]/2),degrees,1)
+        rotated = cv2.warpAffine(img, matrix, (img.shape[1], img.shape[0]))
+        return rotated
+
+    img  = img[max(0,CROP_VERT[0]):min(img.shape[0],CROP_VERT[1]),
+               max(0,CROP_HORZ[0]):min(img.shape[1],CROP_HORZ[1]),:]
+
+    if abs(THETA)>0.01: img = rotate(img, THETA)
+
+    imgs = []
+    for a in [0,1*np.pi/2,2*np.pi/2,3*np.pi/2]:
+        unw = unwrap(img, (img.shape[1]/2, img.shape[0]/2), img.shape[0]/2,
+                   angle_offset=a+np.pi/4, total_angle=np.pi/2)
+        unw = unw[np.clip( CROP_UNWT,0,unw.shape[0]-CROP_UNWB-2)
+                 :np.clip(-CROP_UNWB,-(unw.shape[0]-CROP_UNWT),-1)]
+        imgs.append(unw)
+
+    img = np.hstack(imgs)
+    img = np.flip(img, axis=1).copy()
+    return img
+
+
+
+
+#==============================================================================
+# SAVING
+#==============================================================================
+
+
+def save_graph():
+    graph = {"created_on":time.time(),
+             "raw_nodes"  :{},
+             "graph_nodes":{},
+             "unwrapping_parameters": {"crop_vert":CROP_VERT,
+                                       "crop_horz":CROP_HORZ,
+                                       "crop_unwb":CROP_UNWB,
+                                       "crop_unwt":CROP_UNWT},
+             "docstring":"""
+ROSBag graph dict:
+
+keys: "raw_nodes" - every pose message in the original rosbag, as a dict with keys:
+                    "id"    - monotonically increasing sequence number starting at 0
+                    "stamp" - world time timestamp in seconds
+                    "pose"  - list of x,y,z,y,p,r in odometry frame
+                    "frame" - image from the omni-directional firecam in compressed form (use cv2.imdecode)
+                    "scan"  - laser scan tuple (angle_min, angle_max, np.array(ranges))
+
+      "graph_nodes" - the sparse user-selected nodes that form the environment graph, with
+                      the same keys as the raw nodes, plus:
+                    "edges"        - a set() of edges as tuples (node_id, type, direction) where type is one of:
+                                        "natural"  (temporally adjacent)
+                                        "local"    (loop closure)
+                                        "nonlocal" (i.e. elevator)
+                    "cluster"      - which cluster_id the node belongs to
+                    "origin"       - the offset of the node relative to its pose (dx,dy,dtheta), set by the human
+                    "observations" - ids of raw nodes that are near this one and which can be used for stochastic observations
+
+      "unwrapping_parameters" - a dictionary of parameters for unwrapping the images in the bagfile, with keys:
+                    "crop_vert" - the polar image's vertical crop dimensions
+                    "crop_horz" - the polar image's horizontal crop dimensions
+                    "crop_unwb" - the bottom of the unwrapped image
+                    "crop_unwt" - the top of the unwrapped image
+
+      "created_on" - timestamp when this dictionary was created
+      "docstring"  - this string
+"""
+             }
+
+
+    _clusters = set()
+    num_edges = 0
+    for origin,cluster,nodelist in WS_SEGMENTS:
+        _clusters.add(cluster)
+        for i in range(len(nodelist)):
+            node_dict = {}
+            node_dict.update(dict(nodelist[i]._asdict()))
+            node_dict["edges"] = set()
+            if i > 0               and abs(nodelist[i-1].stamp-nodelist[i].stamp) < 1000: node_dict["edges"].add((nodelist[i-1].id, "natural")); num_edges += 1
+            if i < len(nodelist)-1 and abs(nodelist[i+1].stamp-nodelist[i].stamp) < 1000: node_dict["edges"].add((nodelist[i+1].id, "natural")); num_edges += 1
+            node_dict["cluster"] = cluster
+            node_dict["origin" ] = origin
+
+            node_dict["observations"] = []
+            id = nodelist[i].id
+            pose = np.array(nodelist[i].pose[0:2])
+            for di in range(-5,5):
+                if id+di >= 0 and id+di < len(nodes):
+                    dr = nodelist[i].pose[3]-nodes[id+di].pose[3]
+                    dr = np.arctan2(np.sin(dr), np.cos(dr))
+                    dp = np.linalg.norm(pose-np.array(nodes[id+di].pose[0:2]))
+                    if dp < DSEP/4 and abs(dr)<5*0.0175:
+                        node_dict["observations"].append(id+di)
+
+            graph["graph_nodes"][str(id)] = node_dict
+
+
+
+
+    for a,b,em in WS_EDGES:
+        a_origin,a_cluster,a_segid,a_node = a
+        b_origin,b_cluster,b_segid,b_node = b
+        graph["graph_nodes"][str(a_node.id)]["edges"].add((b_node.id, em))
+        graph["graph_nodes"][str(b_node.id)]["edges"].add((a_node.id, em))
+        num_edges += 2
+
+
+    # only add raw nodes that can be accessed from within this graph
+    for node in graph["graph_nodes"].values():
+        for id in node["observations"]:
+            graph["raw_nodes"][str(id)] = dict(nodes[id]._asdict())
+
+
+
+
+    with StatusLine("Writing graph to file:"):
+        filename = "rawnodes_{}-graphnodes_{}-clusters_{}-edges_{}-{}.pytorch".format(
+                len(graph["raw_nodes"].keys()), len(graph["graph_nodes"].keys()),
+                len(_clusters), num_edges, time.time())
+        print("Writing", filename)
+        torch.save(graph, filename)
+        print("saved.")
+
+
+
+#==============================================================================
+# READING ROSBAG
+#==============================================================================
+
+def load_rosbag(filename):
+    if not os.path.exists(".cache"): os.mkdir(".cache")
+    cachefile = ".cache/"+filename.replace("/","_")+".pytorch"
+    if os.path.exists(cachefile):
+        with StatusLine("Reading cached rosbag {}".format(cachefile)): nodes = torch.load(cachefile)
+
+    else:
+        with StatusLine("Reading rosbag {}".format(filename)):
+            nodes = []
+            frame = None; scan = None; pose = None
+            for topic, msg, t in rosbag.Bag(filename).read_messages():
+                if topic == "/pose":
+                    yaw, pitch, roll = tf.euler_from_quaternion([msg.pose.pose.orientation.x,
+                                                                 msg.pose.pose.orientation.y,
+                                                                 msg.pose.pose.orientation.z,
+                                                                 msg.pose.pose.orientation.w])
+                    pose = [msg.pose.pose.position.x,
+                            msg.pose.pose.position.y,
+                            msg.pose.pose.position.z,
+                            yaw, pitch, roll]
+                    stamp = msg.header.stamp.to_sec()
+
+                if topic == "/firecam/image_raw/compressed":
+                    frame = np.fromstring(msg.data, np.uint8)
+                    if pose is not None and scan is not None: nodes.append({"stamp":stamp, "pose":pose, "frame":frame, "scan":scan})
+
+                if topic == "/scan":
+                    scan = (msg.angle_min, msg.angle_max, np.array(msg.ranges))
+
+            torch.save(nodes, cachefile)
+
+    return nodes
+
+#=================
+# Read all rosbags
+
+rosbags = []
+for filename in sys.argv[1:]:
+    nodes = load_rosbag(filename)
+    start_time = min([node["stamp"] for node in nodes])
+    end_time   = max([node["stamp"] for node in nodes])
+    rosbags.append((nodes, start_time, end_time))
+
+#========================
+# Adjust their timestamps
+
+rosbags  = sorted(rosbags, key=lambda r: r[2])
+origin_t = rosbags[0][1]
+for nodes, start_time, end_time in rosbags:
+    for node in nodes:
+        node["stamp"] = node["stamp"] - start_time + origin_t
+    origin_t += end_time - start_time + 1000
+
+#==============
+# Start the GUI
+
+nodes = []
+for rosbag_nodes, start_time, end_time in rosbags:
+    nodes.extend(rosbag_nodes)
+
+nodes = [Node(id=id,**node) for id,node in enumerate(nodes)]
+
+TMX = max([node.stamp for node in nodes])
+TMN = min([node.stamp for node in nodes])
+
+TGAP = int(TMX-TMN)
+TO   = int(TMN)
+
+cv2.namedWindow("bag",   cv2.WINDOW_NORMAL)
+cv2.namedWindow("ws",    cv2.WINDOW_NORMAL)
+cv2.namedWindow("frame", cv2.WINDOW_NORMAL)
+cv2.createTrackbar("start_t", "bag", 0,      TGAP, handle_tmin)
+cv2.createTrackbar("end_t",   "bag", TGAP-1, TGAP, handle_tmax)
+cv2.createTrackbar("cm_sep",  "bag", int(DSEP*100), 1000, handle_dsep)
+cv2.setMouseCallback("bag", handle_mouse_bag)
+cv2.setMouseCallback("ws",  handle_mouse_ws)
+
+
+
+while True: viz(nodes, TMN, TMX, DSEP)
+
+
+

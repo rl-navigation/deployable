@@ -1,0 +1,317 @@
+#! /usr/bin/env python
+
+from __future__ import print_function, division
+
+import rospy, torch, cv2, numpy as np, sys, time, base64
+from sensor_msgs.msg   import CompressedImage, Joy
+from nav_msgs.msg      import Odometry
+from std_msgs.msg      import String
+from skimage.transform import resize
+
+sys.dont_write_bytecode = True
+from load_graph import *
+from policies   import *
+from graph_env  import *
+from renderer   import *
+
+#==============================================================================
+# PARAMETERS
+
+# ros topics to use
+COMPRESSED_IMAGE_TOPIC = "/firecam/image_raw/compressed"
+JOY_TOPIC              = "/joy"
+ODOM_TOPIC             = "/pose"
+
+# consistent goal location
+GOAL_LOC = 2000 # library lounge area
+
+# unwrapping parameters
+CROP_VERT = [ 26,471]
+CROP_HORZ = [119,567]
+CROP_UNWT = 11
+CROP_UNWB = 41
+THETA = 0.0 # rotate image before unwrapping
+
+# preprocessing parameters
+VISION = "places365"
+STRIDE = 3
+
+#------------------------------------------------------------------------------
+# user args
+
+from args import arg, argvalidate
+arg("--datafile",      "",          "[REQUIRED] The graph file to load the goal representations from")
+arg("--load_ckpt",     "",          "The checkpointed agent to load and run")
+arg("--vision_batch",  64,          "Batch size to use when preprocessing images; lower numbers use less VRAM")
+arg("--vision_init",   "places365", "Initialization for vision network: imagenet, places365, or untrained")
+argvalidate()
+from args import *
+
+#==============================================================================
+# HELPERS
+
+def handle_image(msg):
+    global _img
+    img  = cv2.imdecode(np.fromstring(msg.data, np.uint8), cv2.IMREAD_COLOR)
+    img  = polar_to_cartesian(img, crop_horz=CROP_HORZ, crop_vert=CROP_VERT, crop_unwb=CROP_UNWB, crop_unwt=CROP_UNWT, theta=THETA)
+    _img = img
+
+#------------------------------------------------------------------------------
+
+def handle_odom(msg):
+    global _total_translation, _total_rotation
+    _total_translation += msg.twist.twist.linear.x
+    _total_rotation    += msg.twist.twist.angular.z
+
+#------------------------------------------------------------------------------
+
+def visualize(viz):
+    success, data = cv2.imencode(".jpg", viz)
+    data = np.array(data).tostring()
+    viz_msg = CompressedImage(format="rgb8; jpeg compressed bgr8", data=data)
+    viz_msg.header.stamp = rospy.Time.now()
+    pub_viz.publish(viz_msg)
+
+#------------------------------------------------------------------------------
+
+def handle_joy(msg):
+    global _last, _img, goal_obs, goal_loc, rstate, viz, _obs, _count, _prev_act
+
+    buttons = list(msg.buttons[:4])
+
+    if _img is None: return
+    if buttons == [1,0,0,0]: # if user pressed 'a'
+        if _last is None or time.time()-_last > 2.0:
+            print("Pressed 'a': processing image")
+            _last = time.time()
+            img = resize(_img, (224,224*4), mode="constant")
+            embedding, gradient = model_encode(model, [img], stride=STRIDE)
+            embedding = (embedding-env.emb_mu) / env.emb_sig
+            _obs = embedding + env.noise(gradient)
+            make_decision()
+
+            success, data = cv2.imencode(".jpg", _img)
+            data = np.array(data).tostring()
+            img_msg = CompressedImage(format="rgb8; jpeg compressed bgr8", data=data)
+            img_msg.header.stamp = rospy.Time.now()
+            pub_img.publish(img_msg)
+
+            _count += 1
+
+            visualize(viz)
+            _last = time.time()
+
+    elif buttons == [0,1,0,0]: # user pressed 'b'
+        if _last is None or time.time()-_last > 1.0:
+            print("Reset: failure")
+            _last = time.time()
+            old_goal_loc = goal_loc
+            env.workers_done[0] = True
+            _, goal_obs, _prev_act, _, goal_loc = env.reset(goal_loc=GOAL_LOC)
+            rstate = agent.rec(1)
+            rst_msg = String(data = "|".join([str(v) for v in ["failure", old_goal_loc, goal_loc]]))
+            pub_rst.publish(rst_msg)
+
+            _count = 0
+
+            visualize(viz)
+            _last = time.time()
+
+    elif buttons == [0,0,1,0]: # user pressed 'x'
+        if _last is None or time.time()-_last > 1.0:
+            print("Reset: success")
+            _last = time.time()
+            old_goal_loc = goal_loc
+            env.workers_done[0] = True
+            _, goal_obs, _prev_act, _, goal_loc = env.reset(goal_loc=GOAL_LOC)
+            rstate = agent.rec(1)
+            rst_msg = String(data = "|".join([str(v) for v in ["success", old_goal_loc, goal_loc]]))
+            pub_rst.publish(rst_msg)
+            env.curriculum_level = min(env.curriculum_level+1, env.curriculum_levels-1)
+
+            _count = 0
+
+            visualize(viz)
+            _last = time.time()
+
+    elif buttons == [0,0,0,1]: # user pressed 'y'
+        if _last is None or time.time()-_last > 1.0:
+            print("Reset: new goal")
+            _last = time.time()
+            old_goal_loc = goal_loc
+            env.workers_done[0] = True
+            _, goal_obs, _prev_act, _, goal_loc = env.reset(goal_loc=GOAL_LOC)
+            rstate = agent.rec(1)
+            rst_msg = String(data = "|".join([str(v) for v in ["new-goal-neither-success-nor-failure", old_goal_loc, goal_loc]]))
+            pub_rst.publish(rst_msg)
+
+            _count = 0
+
+            visualize(viz)
+            _last = time.time()
+
+#------------------------------------------------------------------------------
+
+def describe_action(action):
+    if   action == 0: msg = "TURN LEFT"
+    elif action == 1: msg = "FORWARD"
+    elif action == 2: msg = "TURN RIGHT"
+    else:
+        cluster = env.lookup_cluster_from_direction[action-3]
+        if   cluster == 1: msg = "ELEVATOR TO S-11"
+        elif cluster == 2: msg = "ELEVATOR TO S-3"
+        elif cluster == 3: msg = "ELEVATOR TO S-4"
+        elif cluster == 4: msg = "ELEVATOR TO S-5"
+        elif cluster == 6: msg = "ELEVATOR TO O-3"
+        elif cluster == 7: msg = "ELEVATOR TO O-4"
+        elif cluster == 8: msg = "ELEVATOR TO O-5"
+        else: msg = "WARNING: UNRECOGNIZED CLUSTER '{}'".format(cluster)
+    return msg
+
+#------------------------------------------------------------------------------
+
+def make_decision():
+    global rstate, _msg, _probs, _loc_estimate, _goal_estimate, _prev_act, _total_translation, _total_rotation
+
+    if   _total_translation < 10.0 and     _total_rotation >  10.0: a = 0 # turn left
+    elif _total_translation < 10.0 and     _total_rotation < -10.0: a = 2 # turn right
+    elif _total_translation > 10.0 and abs(_total_rotation) < 10.0: a = 1 # turn forward
+    else: a = np.argmax(_probs)
+
+    _prev_act = np.zeros((1,env.action_space.n), np.float32)
+    _prev_act[0,a] = 1
+
+    action, all_probs, rstate = agent.act(_obs, goal_obs, _prev_act, rstate, deterministic=False)
+    _probs = all_probs[0]
+    _loc_estimate, _goal_estimate = agent.loc(rstate)
+
+    msg = describe_action(action)
+
+    _msg = "{}: {}".format(_count, msg)
+
+    prb_msg = String(data = base64.b64encode(all_probs))
+    pub_prb.publish(prb_msg)
+
+    obs_msg = String(data = base64.b64encode(_obs))
+    pub_obs.publish(obs_msg)
+
+    gol_msg = String(data = base64.b64encode(goal_obs))
+    pub_gol.publish(gol_msg)
+
+    act_msg = String(data = base64.b64encode(_prev_act))
+    pub_act.publish(act_msg)
+
+    _total_translation = 0
+    _total_rotation = 0
+
+#==============================================================================
+# RUN
+
+_img   = None
+_obs   = None
+_last  = None
+_msg   = None
+_probs = None
+_msg_color = None
+_loc_estimate  = None
+_goal_estimate = None
+_count = 0
+_total_rotation = 0
+_total_translation = 0
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = VISION_BATCH,
+               shifts          = 0,
+               shift_radians   = 0,
+               max_variations  = 1,
+               stride          = STRIDE,
+               vision_init     = VISION_INIT,
+               workers         = 1,
+               stutter_prob    = 0,
+               noise_sigma     = 0.01,
+               noise_theta     = 0.15,
+               curr_levels     = 2,
+               curr_upd_int    = 100,
+               curr_thresh     = 1.0,
+               bump_penalty    = 0.0,
+               headless        = False,
+               elevator_radius = 1)
+
+_, goal_obs, _prev_act, _, goal_loc = env.reset(goal_loc=GOAL_LOC)
+_probs = np.ones((env.action_space.n,), np.float32)/env.action_space.n
+
+key, viz = render(graph=env.graph,
+                  id_to_location=env.id_to_location,
+                  goal_location=env.workers_goal[0],
+                  goal_backward=env.workers_g_back[0],
+                  timestep=_count,
+                  time_limit=1000,
+                  agent_obs=env._img_at(env.workers_location[0], env.workers_backward[0]),
+                  goal_obs=env._img_at(env.workers_goal[0], env.workers_g_back[0]),
+                  agent_features=env.workers_obs[0],
+                  goal_features=env.workers_goal_obs[0])
+
+checkpoint = torch.load(LOAD_CKPT)
+
+agent = ActorCritic(obs_space     = env.observation_space,
+                    act_space     = env.action_space,
+                    num_locations = env.num_locations,
+                    gamma         = 0.99,
+                    lr            = 1e-4,
+                    ent_weight    = 1e-4)
+
+agent.load_state_dict(checkpoint["agent.state_dict"])
+
+rstate = agent.rec(1)
+
+print("------------------------")
+print("Agent trained with hyperparameters:")
+print("\n".join(["{:30}: {}".format(k,v) for k,v in checkpoint["hyperparameters"].items()]))
+print("------------------------")
+print("Loaded agent with {:.03f} million frames of experience".format(checkpoint["frames_observed"]/1e6))
+print("------------------------")
+print("Performance:")
+print("Mean episode length: ", checkpoint["episode_length"])
+print("Mean episode reward: ", checkpoint["episode_reward"])
+print("Mean path optimality:", checkpoint["fraction_of_optimal"])
+print("------------------------")
+
+model = load_vision(VISION)
+
+rospy.init_node("navigation_node")
+
+# publishing telemetry for later analysis in the bagfile
+pub_viz = rospy.Publisher("nav_agent/viz/image_raw/compressed", CompressedImage, queue_size=10)
+pub_img = rospy.Publisher("nav_agent/img/image_raw/compressed", CompressedImage, queue_size=10)
+pub_obs = rospy.Publisher("nav_agent/obs", String, queue_size=100)
+pub_gol = rospy.Publisher("nav_agent/gol", String, queue_size=100)
+pub_prb = rospy.Publisher("nav_agent/prb", String, queue_size=100)
+pub_rst = rospy.Publisher("nav_agent/rst", String, queue_size=100)
+pub_act = rospy.Publisher("nav_agent/act", String, queue_size=100)
+
+rst_msg = String(data = "|".join([str(v) for v in ["initial", "initial", goal_loc]]))
+pub_rst.publish(rst_msg)
+
+sub_img = rospy.Subscriber(COMPRESSED_IMAGE_TOPIC, CompressedImage, handle_image)
+sub_joy = rospy.Subscriber(JOY_TOPIC,  Joy,      handle_joy)
+sub_odo = rospy.Subscriber(ODOM_TOPIC, Odometry, handle_odom)
+
+while True:
+    _msg_color = (0,255,0) if _last is None or time.time()-_last < 2 else (0,0,255)
+    key, viz = render(graph=env.graph,
+                      id_to_location=env.id_to_location,
+                      goal_location=env.workers_goal[0],
+                      goal_backward=env.workers_g_back[0],
+                      timestep=_count,
+                      time_limit=1000,
+                      agent_obs=_img if _img is not None else env._img_at(env.workers_location[0], env.workers_backward[0]),
+                      agent_features=_obs,
+                      goal_obs=env._img_at(env.workers_goal[0], env.workers_g_back[0]),
+                      goal_features=env.workers_goal_obs[0],
+                      msg=_msg,
+                      action_probs=_probs,
+                      localization=_loc_estimate,
+                      goal_estimate=_goal_estimate,
+                      msg_color=_msg_color)
+    time.sleep(0.3)
+

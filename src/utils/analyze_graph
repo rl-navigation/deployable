@@ -1,0 +1,192 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import sys, os, torch, networkx as nx, cv2, numpy as np, subprocess, palettable
+sys.dont_write_bytecode = True
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+
+#==============================================================================
+# PARAMS
+
+H = W = 2000
+B = 50
+#NBINS = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
+NBINS = [32]
+
+#==============================================================================
+# HELPERS
+
+def colormap_thermal(v):
+    color = palettable.cmocean.sequential.Thermal_20.mpl_colormap(v)
+    return tuple([int(c*255) for c in color])
+
+def colormap_jet(v, vmin=0, vmax=1):
+    c = [1., 1., 1.]; R, G, B = 0, 1, 2; dv = 0
+    if v < vmin: v = vmin
+    if v > vmax: v = vmax
+    dv = vmax - vmin
+    if   v < (vmin + 0.25 * dv): c[R] = 0;  c[G] = 4 * (v - vmin) / dv
+    elif v < (vmin + 0.5  * dv): c[R] = 0.; c[B] = 1 + 4 * (vmin + 0.25 * dv - v) / dv
+    elif v < (vmin + 0.75 * dv): c[R] = 4 * (v - vmin - 0.5 * dv) / dv; c[B] = 0.
+    else: c[G] = 1 + 4 * (vmin + 0.75 * dv - v) / dv; c[B] = 0.
+    return tuple([int(ci*255) for ci in reversed(c)])
+
+colormap = colormap_jet
+
+#==============================================================================
+# SETUP
+
+basename = os.path.basename(sys.argv[1])
+if not os.path.exists("data" ): os.mkdir("data")
+if not os.path.exists("plots"): os.mkdir("plots")
+
+print("Loading graph...")
+graph = torch.load(sys.argv[1])
+
+#==============================================================================
+# BUILD GRAPH AND COMPUTE PATHS
+
+print("Building network...")
+G = nx.Graph()
+for node_id,node in graph["graph_nodes"].items(): G.add_node(node_id)
+for node_id,node in graph["graph_nodes"].items():
+    for (target_id,edge_type,edge_direction) in node["edges"]:
+        G.add_edge(node_id, str(target_id))
+        G.add_edge(str(target_id), node_id)
+
+print("Computing optimal paths...")
+optimal_paths = dict(nx.all_pairs_shortest_path(G))
+
+print("Computing optimal path lengths...")
+path_lengths = []
+for start in optimal_paths.keys():
+    for end in optimal_paths[start].keys():
+        path_lengths.append(len(optimal_paths[start][end]))
+
+print("Saving all lengths...")
+with open("data/"+basename.replace("/","_")+".all_lengths.dat", "w") as f:
+    f.write("\n".join([str(v) for v in path_lengths]))
+
+#==============================================================================
+# LENGTH HISTOGRAM
+
+print("Making histograms of path lengths...")
+for nbins in NBINS:
+    print("{} bins...".format(nbins))
+    counts, bins = np.histogram(np.array(path_lengths), bins=nbins)
+    with open("data/"+basename.replace("/","_")+".length_hist.{}.dat".format(nbins), "w") as f:
+        f.write("\n".join(["{} {}".format(b,c) for b,c in zip(bins,counts)]))
+
+#==============================================================================
+# COUNTING HOW OFTEN EACH NODE IS ON A SHORTEST PATH
+
+print("Counting occurrence of each node in the shortest paths...")
+traversal_count = {k:0 for k in graph["graph_nodes"].keys()}
+for start in optimal_paths.keys():
+    for end in optimal_paths[start].keys():
+        for node_id in optimal_paths[start][end]:
+            traversal_count[node_id] += 1
+
+#==============================================================================
+# RENDERING VISIT COUNT ON IMAGE
+
+print("Rendering graph with traversal count heatmap...")
+
+min_count = min(traversal_count.values())
+max_count = max(traversal_count.values())
+
+# transform node positions to workspace coordinates
+def topos(node,offset=0):
+    x,y = node["pose"][0:2]
+    if len(node["origin"]) == 3: dx,dy,dtheta = node["origin"]
+    else: dx, dy = node["origin"]; dtheta = 0
+    xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+    yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+    x = xr + dx; y = yr + dy
+    if type(offset) is not int: offset = np.matmul(np.array([[np.cos(-dtheta), -np.sin(-dtheta)],[np.sin(-dtheta), np.cos(-dtheta)]]), offset)
+    return np.array([x,y],np.float32) + offset
+
+# determine the size of the workspace
+poses = [topos(node) for node in graph["graph_nodes"].values()]
+poses = np.array(poses)
+xmn = poses[:,0].min(); xmx = poses[:,0].max(); xgp = xmx-xmn
+ymn = poses[:,1].min(); ymx = poses[:,1].max(); ygp = ymx-ymn
+if   ygp > xgp: xmn-=(ygp-xgp)/2; xmx+=(ygp-xgp)/2
+elif xgp > ygp: ymn-=(xgp-ygp)/2; ymx+=(xgp-ygp)/2
+def topix(x,y): return (int((x-xmn)/(xmx-xmn+1e-8)*(W-2*B)+B), H-int((y-ymn)/(ymx-ymn+1e-8)*(H-2*B)+B))
+
+img = np.full((H,W,3), 255, np.uint8)
+# draw edges first
+for node_id,node in graph["graph_nodes"].items():
+    for target_id,edge_type,edge_direction in node["edges"]:
+        p1 = topix(*topos(node)); p2 = topix(*topos(graph["graph_nodes"][str(target_id)]))
+        cv2.line(img, p1, p2, (0,0,0), 2)
+
+img_flat = img.copy()
+# draw nodes
+for node_id,node in sorted(graph["graph_nodes"].items(), key=lambda x: traversal_count[x[0]]):
+    f = (traversal_count[node_id]-float(min_count))/float(max_count-min_count)
+    color = colormap(f)
+    cv2.circle(img,      topix(*topos(node)), int(20*f)+5, color, -1)
+    cv2.circle(img_flat, topix(*topos(node)),           5, color, -1)
+
+cv2.imwrite("plots/traversal_counts.png",      img)
+cv2.imwrite("plots/traversal_counts_flat.png", img_flat)
+
+#==============================================================================
+# RENDERING RATIO OF SHORTEST PATH VISITATIONS TO AGENT VISITATIONS
+
+agent_visit_count = torch.load("data/checkpoints_wintermute1528108143.35_frames_observed896006400_visit_count.pytorch")
+
+visit_count_ratio = {}
+for node_id in graph["graph_nodes"].keys():
+    visit_count_ratio[node_id] = float(agent_visit_count[node_id]) / float(traversal_count[node_id])
+
+mean_ratio = np.mean(visit_count_ratio.values())
+std_ratio  = np.std (visit_count_ratio.values())
+
+img = np.full((H,W,3), 255, np.uint8)
+
+# draw edges first
+for node_id,node in graph["graph_nodes"].items():
+    for target_id,edge_type,edge_direction in node["edges"]:
+        p1 = topix(*topos(node)); p2 = topix(*topos(graph["graph_nodes"][str(target_id)]))
+        cv2.line(img, p1, p2, (192,192,192), 2)
+
+img_flat = img.copy()
+# draw nodes
+for node_id,node in sorted(graph["graph_nodes"].items(), key=lambda x: visit_count_ratio[x[0]]):
+    f = (visit_count_ratio[node_id]-mean_ratio)/std_ratio
+    f = np.clip((f+2)/(2+2), 0, 1)
+    color = colormap(f)
+    cv2.circle(img,      topix(*topos(node)), int(20*f)+5, color, -1)
+    cv2.circle(img_flat, topix(*topos(node)),           5, color, -1)
+
+cv2.imwrite("plots/visit_count_ratio.png",      img)
+cv2.imwrite("plots/visit_count_ratio_flat.png", img_flat)
+
+print("Making histograms of node visitation ratios...")
+for nbins in NBINS:
+    print("{} bins...".format(nbins))
+    data = np.array(visit_count_ratio.values())
+    data = np.clip(data, mean_ratio-2*std_ratio, mean_ratio+2*std_ratio)
+    counts, bins = np.histogram(data, bins=nbins)
+    with open("data/"+basename.replace("/","_")+".visit_count_ratio.{}.dat".format(nbins), "w") as f:
+        f.write("\n".join(["{} {}".format(b,c) for b,c in zip(bins,counts)]))
+
+#==============================================================================
+# GNUPLOTS
+
+for nbins in NBINS:
+    for hist in ["length_hist", "traversal_hist", "visit_count_ratio"]:
+        datfile = "data/{}.{}.{}.dat".format(basename, hist, nbins)
+        gnuplot_cmd = """
+            set terminal png enhanced size 1024,1024 font "HelveticaBold,24";
+            set output "plots/{hist}_{nbins}.png";
+            set style fill solid 0.7;
+            set title "{hist}_{nbins}";
+            plot "{datfile}" w boxes notitle;
+        """.format(datfile=datfile, hist=hist, nbins=nbins)
+        subprocess.call(["gnuplot", "-e", gnuplot_cmd])
+

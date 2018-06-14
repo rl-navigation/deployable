@@ -1,0 +1,78 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision
+
+sys.dont_write_bytecode = True
+from graph_env import *
+from policies  import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--datafile",       "",            "[REQUIRED] Pytorch file containing the navigation graph")
+arg("--seed",           -1,            "Pseudorandom number generator seed")
+arg("--vision_batch",   128,           "Batch size to use when preprocessing images; lower numbers use less VRAM")
+arg("--shifts",         5,             "Number of different rotations for stochastic observations")
+arg("--shift_radians",  0.07,          "Number of radians to rotate the image for each shift increment")
+arg("--noise_sigma",    0.005,         "Scale of the O-U noise on the pixels")
+arg("--noise_theta",    0.15,          "Decay of the O-U noise on the pixels")
+arg("--stutter_prob",   0.05,          "Probability of failing to move forward")
+arg("--stride",         3,             "Stride of pooling in vision; 1 is full overlap, 3 is 1/2 overlap, 7 is no overlap")
+arg("--vision_init",    "places365",   "Initialization for vision network: imagenet, places365, or untrained")
+arg("--workers",        64,            "Number of workers to run (even though we only control and see one)")
+argvalidate()
+from args import *
+
+#==============================================================================
+# GENERAL SETUP
+
+if SEED < 0: SEED = int(time.time()*1000)%(10000); HYPERS["--seed"] = SEED
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = VISION_BATCH,
+               shifts          = SHIFTS,
+               shift_radians   = SHIFT_RADIANS,
+               stride          = STRIDE,
+               vision_init     = VISION_INIT,
+               workers         = WORKERS,
+               noise_sigma     = NOISE_SIGMA,
+               noise_theta     = NOISE_THETA,
+               stutter_prob    = STUTTER_PROB,
+               elevator_radius = 1,     # connect nodes within X meters of an elevator to the elevator
+               bump_penalty    = 0.0,   # deliver a negative reward for moving into a wall
+               max_variations  = -1,    # limit the number of stochastic variations on images (-1 means use everything)
+               curr_levels     = 100,   # how many discrete levels of difficulty
+               curr_thresh     = 0.8,   # agent must achieve this level of performance in order to increase curriculum
+               curr_upd_int    = 100,   # how many episodes between checking if performance exceeds threshold
+               headless        = False)
+
+# full curriculum
+env.curriculum_level = env.curriculum_levels-1
+
+#==============================================================================
+# RUN
+
+while True:
+    obs, goal = env.reset()[:2]; done = [False]*WORKERS
+    while not done[0]:
+        action = -1
+        while action not in range(3):
+            key, img = env.render(mode="human", wait=0, action_keys=['q','w','e','1','2','3','4','5','6','7'])
+            key &= 0xff
+            if   key == ord('q'): action = 0
+            elif key == ord('w'): action = 1
+            elif key == ord('e'): action = 2
+            elif key == 27      : sys.exit(0)
+
+        action_array = np.random.randint(0,3,(WORKERS,),np.int64)
+        action_array[0] = action
+        obs, goal, pact, rew, done, diag_locs, diag_goals = env.step(action_array)
+        if   done[0] and rew[0] > 0.1: cv2.imshow("GraphEnv", np.full((900,1600,3),[0,255,0],np.uint8)); cv2.waitKey(0)
+        elif done[0] and rew[0] < 0.1: cv2.imshow("GraphEnv", np.full((900,1600,3),[0,0,255],np.uint8)); cv2.waitKey(0)
+

@@ -1,0 +1,208 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision, rospy, rosbag, base64
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg    import String
+
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.dont_write_bytecode = True
+from graph_env  import *
+from policies   import *
+from load_graph import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--load_latest",    None, "Load the most recent checkpoint in the ckpt_dir")
+arg("--load_hypers",    None, "When loading a checkpoint, load its hyperparameters as well")
+arg("--deterministic",  None, "Use a deterministic policy, always selecting the argmax of the logits")
+arg("--headless",       None, "Save images only, don't render_loc in a window")
+arg("--datafile",       "",   "Pytorch file containing the navigation graph")
+arg("--bagfile",        "",   "ROS bag file containing the recording of the experiment")
+arg("--save_images",    "",   "Directory to save images for making a video")
+arg("--load_ckpt",      "",   "Existing agent to load")
+argvalidate()
+from args import *
+
+H = W = 500
+B = 25
+
+#==============================================================================
+# GENERAL SETUP
+
+# make a directory for saving images
+if SAVE_IMAGES != "" and not os.path.exists(SAVE_IMAGES): os.mkdir(SAVE_IMAGES)
+
+# if we want to load the most recent checkpoint, then figure out what that is and set it
+if LOAD_LATEST:
+    ckpts       = glob.glob('{}/*'.format(CKPT_DIR))
+    ckpt_latest = max(ckpts, key=os.path.getctime)
+    LOAD_CKPT = HYPERS["--load_ckpt"] = ckpt_latest
+
+# potentially load hyperparameters from a checkpoint
+if LOAD_CKPT != "":
+    checkpoint = torch.load(LOAD_CKPT)
+    if LOAD_HYPERS and "hyperparameters" in checkpoint:
+        HYPERS.update(checkpoint["hyperparameters"])
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = 128,
+               shifts          = 0,
+               shift_radians   = 0,
+               stride          = 3,
+               vision_init     = "places365",
+               workers         = 1,
+               noise_sigma     = 0.0,
+               noise_theta     = 0.0,
+               stutter_prob    = 0.0,
+               curr_levels     = 1,
+               curr_upd_int    = 1000,
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = 1,
+               bump_penalty    = 0,
+               elevator_radius = 1)
+env.curriculum_level = env.curriculum_levels-1 # start hardest
+_, _, prev_act, _, _ = env.reset()
+
+#==============================================================================
+# AGENT SETUP
+
+agent = ActorCritic(obs_space     = env.observation_space,
+                    act_space     = env.action_space,
+                    num_locations = env.num_locations,
+                    gamma         = 0.99,
+                    lr            = 1e-4,
+                    ent_weight    = 1e-1)
+
+rstate = agent.rec(1)
+
+#==============================================================================
+# LOAD CHECKPOINT
+
+if LOAD_CKPT != "":
+    ckpt_state_dict  = checkpoint["agent.state_dict"] # all the state required to resume the agent and training
+    agent.load_state_dict(ckpt_state_dict)
+
+#==============================================================================
+# HELPERS
+
+def get_color_jet(v, vmin=0, vmax=1):
+    c = [1., 1., 1.]; R, G, B = 0, 1, 2; dv = 0
+    if v < vmin: v = vmin
+    if v > vmax: v = vmax
+    dv = vmax - vmin
+    if   v < (vmin + 0.25 * dv): c[R] = 0;  c[G] = 4 * (v - vmin) / dv
+    elif v < (vmin + 0.5  * dv): c[R] = 0.; c[B] = 1 + 4 * (vmin + 0.25 * dv - v) / dv
+    elif v < (vmin + 0.75 * dv): c[R] = 4 * (v - vmin - 0.5 * dv) / dv; c[B] = 0.
+    else: c[G] = 1 + 4 * (vmin + 0.75 * dv - v) / dv; c[B] = 0.
+    return tuple([int(ci*255) for ci in reversed(c)])
+
+#------------------------------------------------------------------------------
+
+def render_loc(loc, all_probs):
+    # transform node positions to workspace coordinates
+    def topos(node,offset=0):
+        x,y = node["pose"][0:2]
+        if len(node["origin"]) == 3: dx,dy,dtheta = node["origin"]
+        else: dx, dy = node["origin"]; dtheta = 0
+        xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+        yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+        x = xr + dx; y = yr + dy
+        if type(offset) is not int: offset = np.matmul(np.array([[np.cos(-dtheta), -np.sin(-dtheta)],[np.sin(-dtheta), np.cos(-dtheta)]]), offset)
+        return np.array([x,y],np.float32) + offset
+
+    # determine the size of the workspace
+    poses = [topos(node) for node in env.graph["graph_nodes"].values()]
+    poses = np.array(poses)
+    xmn = poses[:,0].min(); xmx = poses[:,0].max(); xgp = xmx-xmn
+    ymn = poses[:,1].min(); ymx = poses[:,1].max(); ygp = ymx-ymn
+    if   ygp > xgp: xmn-=(ygp-xgp)/2; xmx+=(ygp-xgp)/2
+    elif xgp > ygp: ymn-=(xgp-ygp)/2; ymx+=(xgp-ygp)/2
+    def topix(x,y): return (int((x-xmn)/(xmx-xmn+1e-8)*(W-2*B)+B), H-int((y-ymn)/(ymx-ymn+1e-8)*(H-2*B)+B))
+
+    img = np.full((H,W,3), 255, np.uint8)
+    # draw edges first
+    for node_id,node in env.graph["graph_nodes"].items():
+        for target_id,edge_type,edge_direction in node["edges"]:
+            p1 = topix(*topos(node)); p2 = topix(*topos(env.graph["graph_nodes"][str(target_id)]))
+            cv2.line(img, p1, p2, (0,0,0), 2)
+
+    # draw nodes
+    for node_id,node in sorted(env.graph["graph_nodes"].items(), key=lambda x: loc[env.location_to_id[x[0]]]):
+        f = loc[env.location_to_id[node_id]]
+        f = np.log(1+1000*f)/np.log(1+1000)
+        color = get_color_jet(f)
+        cv2.circle(img, topix(*topos(node)), int(8*f)+1, color, -1)
+
+    return img
+
+#------------------------------------------------------------------------------
+
+def step_agent(obs, goal, prev_act, rstate):
+    obs      = obs     .reshape(1,-1)
+    goal     = goal    .reshape(1,-1)
+    prev_act = prev_act.reshape(1,-1)
+    acts, all_probs, rstate = agent.act(obs, goal, prev_act, rstate)
+    loc_estimate, gol_estimate = agent.loc(rstate)
+    return rstate, loc_estimate, gol_estimate, all_probs
+
+#==============================================================================
+# RUN
+
+unwrapping_parameters = env.graph["unwrapping_parameters"]
+
+print("Reading experiment from bagfile...")
+obs_sequence = []; act_sequence = [prev_act]; img_sequence = []
+for topic, msg, t in rosbag.Bag(BAGFILE).read_messages():
+    if topic == "/nav_agent/gol":
+        goal = base64.decodestring(msg.data)
+        goal = np.frombuffer(goal, dtype=np.float32)
+
+    if topic == "/nav_agent/obs":
+        obs  = base64.decodestring(msg.data)
+        obs  = np.frombuffer(obs,  dtype=np.float32)
+        obs_sequence.append(obs)
+
+        img  = cv2.imdecode(np.fromstring(img, np.uint8), cv2.IMREAD_COLOR)
+        img  = polar_to_cartesian(img, theta=0, **unwrapping_parameters)
+        img_sequence.append(img)
+
+    if topic == "/nav_agent/act":
+        act  = base64.decodestring(msg.data)
+        act  = np.frombuffer(act,  dtype=np.float32)
+        act_sequence.append(act)
+
+    if topic == "/nav_agent/prb":
+        prb  = base64.decodestring(msg.data)
+        prb  = np.frombuffer(prb,  dtype=np.float32)
+
+    if topic == "/firecam/image_raw/compressed":
+        img  = msg.data
+
+print("Read {} observations, {} actions".format(len(obs_sequence), len(act_sequence)))
+
+bagtag = os.path.basename(BAGFILE).replace(".","_")
+locdir = "data/loc/{}".format(bagtag)
+
+if not os.path.exists("data"    ): os.mkdir("data"    )
+if not os.path.exists("data/loc"): os.mkdir("data/loc")
+if not os.path.exists(locdir    ): os.mkdir(locdir    )
+
+print("Running experiment through network...")
+for step,(obs,img_obs,prev_act) in enumerate(zip(obs_sequence, img_sequence, act_sequence)):
+    rstate, loc_est, gol_est, all_probs = step_agent(obs, goal, prev_act, rstate)
+    img_loc = render_loc(loc_est, all_probs)
+    fy = img_loc.shape[0]/float(img_obs.shape[0])
+    img_viz = np.hstack([img_loc, cv2.resize(img_obs, fx=fy, fy=fy, dsize=None)])
+
+    cv2.imshow("process_experiment", img_viz)
+    cv2.waitKey(1)
+    cv2.imwrite(os.path.join(locdir, "{}.png".format(step)), img_viz)
+

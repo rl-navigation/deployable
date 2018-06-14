@@ -1,0 +1,168 @@
+#! /usr/bin/env python2
+
+"""
+This script allows the user to label which experiment succeeded, which failed, and which to discard
+(for example, because the robot's battery died or there was a hardware issue).
+"""
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision, rospy, rosbag, base64, shutil
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg    import String
+
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.dont_write_bytecode = True
+from graph_env  import *
+from policies   import *
+from load_graph import *
+
+#==============================================================================
+# PARAMS
+
+# goal location near the center of campus
+GOAL_ID = "60748"
+
+H = W = 1080
+B = 25
+MIN_DIST = 20
+
+# line thickness
+T = 8
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = "graphs/entire-campus.pytorch",
+               vision_batch    = 128,
+               shifts          = 0,
+               shift_radians   = 0,
+               stride          = 3,
+               vision_init     = "places365",
+               workers         = 1,
+               noise_sigma     = 0.0,
+               noise_theta     = 0.0,
+               stutter_prob    = 0.0,
+               curr_levels     = 1,
+               curr_upd_int    = 1000,
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = 1,
+               bump_penalty    = 0,
+               elevator_radius = 1)
+env.curriculum_level = env.curriculum_levels-1 # start hardest
+_, _, prev_act, _, _ = env.reset()
+
+#==============================================================================
+# HELPERS
+
+def draw(path, offset, color, goal_id, img=None, no_starts=False, index=None):
+    # transform node positions to workspace coordinates
+    def topos(node,offset=0):
+        x,y = node["pose"][0:2]
+        if len(node["origin"]) == 3: dx,dy,dtheta = node["origin"]
+        else: dx, dy = node["origin"]; dtheta = 0
+        xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+        yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+        x = xr + dx; y = yr + dy
+        if type(offset) is not int: offset = np.matmul(np.array([[np.cos(-dtheta), -np.sin(-dtheta)],[np.sin(-dtheta), np.cos(-dtheta)]]), offset)
+        return np.array([x,y],np.float32) + offset
+
+    # determine the size of the workspace
+    poses = [topos(node) for node in env.graph["graph_nodes"].values()]
+    poses = np.array(poses)
+    xmn = poses[:,0].min(); xmx = poses[:,0].max(); xgp = xmx-xmn
+    ymn = poses[:,1].min(); ymx = poses[:,1].max(); ygp = ymx-ymn
+    if   ygp > xgp: xmn-=(ygp-xgp)/2; xmx+=(ygp-xgp)/2
+    elif xgp > ygp: ymn-=(xgp-ygp)/2; ymx+=(xgp-ygp)/2
+    def topix(x,y): return (int((x-xmn)/(xmx-xmn+1e-8)*(W-2*B)+B), H-int((y-ymn)/(ymx-ymn+1e-8)*(H-2*B)+B))
+
+    def draw_map():
+        img = np.full((H,W,3), 255, np.uint8)
+        _connections = {}
+        def connection_needed(a,b):
+            ca = env.graph["graph_nodes"][str(a)]["cluster"]
+            cb = env.graph["graph_nodes"][str(b)]["cluster"]
+            needed = (ca,cb) not in _connections
+            _connections[(ca,cb)] = True
+            _connections[(cb,ca)] = True
+            return needed
+        # draw edges first
+        for node_id,node in env.graph["graph_nodes"].items():
+            for target_id,edge_type,edge_direction in node["edges"]:
+                if edge_type != "nonlocal" or connection_needed(node_id,target_id):
+                    p1 = topix(*topos(node)); p2 = topix(*topos(env.graph["graph_nodes"][str(target_id)]))
+                    cv2.line(img, p1, p2, (192,192,192), T//4)
+        # draw nodes
+        for node_id,node in env.graph["graph_nodes"].items():
+            cv2.circle(img, topix(*topos(node)), T//2, (192,192,192), -1)
+        return img
+
+    if img is None: img = draw_map()
+
+    prev_pos = None
+    for node_id in path:
+        pos = topix(*topos(env.graph["graph_nodes"][str(node_id)], offset))
+        if prev_pos is not None: cv2.line(img, prev_pos, pos, color, T)
+        prev_pos = pos
+
+    if not no_starts:
+        cv2.circle(img, topix(*topos(env.graph["graph_nodes"][str(path[0])], offset)), 4*T-1,  color, -1)
+        cv2.circle(img, topix(*topos(env.graph["graph_nodes"][str(path[0])], offset)), 4*T,   (0,0,0), T//2)
+        if index is not None:
+            pos = topix(*topos(env.graph["graph_nodes"][str(path[0])]))
+            pos = (pos[0]-(7*T//4)-(index>=9)*(5*T//4), pos[1]+7*(T//4))
+            cv2.putText(img, str(index+1), pos, cv2.FONT_HERSHEY_SIMPLEX, (0.7 - (index>=9)*0.1)*(T/4.0), (0,0,0), T//2)
+
+    cv2.rectangle(img, topix(*topos(env.graph["graph_nodes"][str(goal_id)], -(7*T//4))),
+                       topix(*topos(env.graph["graph_nodes"][str(goal_id)], +(7*T//4))), (0,128,255), -1)
+    cv2.rectangle(img, topix(*topos(env.graph["graph_nodes"][str(goal_id)], -(7*T//4))),
+                       topix(*topos(env.graph["graph_nodes"][str(goal_id)], +(7*T//4))), (0,0,0), T//2)
+
+    cv2.putText(img, "G", topix(*topos(env.graph["graph_nodes"][str(goal_id)], [-3*T//4,-4*T//4])), cv2.FONT_HERSHEY_SIMPLEX, 1.0*T/4, (0,0,0), 3*T//4)
+
+    cv2.imshow("select", img)
+    key = cv2.waitKey(0) & 0xff
+    if   key == ord('s'): return "success", img
+    elif key == ord('f'): return "failure", img
+    elif key == ord('d'): return "discard", img
+    else: return draw(path, offset, color, goal_id, index=index, img=img, no_starts=no_starts)
+
+#==============================================================================
+# RUN
+
+from palettable.cartocolors.qualitative import Vivid_10, Bold_10, Pastel_10, Prism_10, Safe_10
+COLORS = [tuple(c) for c in Vivid_10.colors + Bold_10.colors + Pastel_10.colors + Prism_10.colors + Safe_10.colors]
+
+if not os.path.exists("plots"): os.mkdir("plots")
+
+valid_experiment_count = 0
+
+# DRAW EMPIRICAL TRAJECTORIES
+for i,filename in enumerate(sys.argv[1:]):
+    labelled_trajectory = torch.load(filename)
+    color = COLORS[i%len(COLORS)]
+    offset = 0 #(np.random.random((2,))*2-1)*5
+
+    obs_sequence = labelled_trajectory["obs"]
+    img_sequence = labelled_trajectory["img"]
+    act_sequence = labelled_trajectory["act"]
+    loc_sequence = labelled_trajectory["loc"]
+    goal_id      = labelled_trajectory["gol"]
+
+    decision, img = draw(loc_sequence, offset, color, goal_id, img=None, index=valid_experiment_count+1)
+
+    if   decision == "success":
+        shutil.copyfile(filename, "data/experiment_{:02d}_success.pytorch".format(valid_experiment_count))
+        cv2.imwrite("data/trajectory_{}.png".format(valid_experiment_count), img)
+        print("Experiment", valid_experiment_count, "is", filename)
+        valid_experiment_count += 1
+    elif decision == "failure":
+        shutil.copyfile(filename, "data/experiment_{:02d}_failure.pytorch".format(valid_experiment_count))
+        cv2.imwrite("data/trajectory_{}.png".format(valid_experiment_count), img)
+        print("Experiment", valid_experiment_count, "is", filename)
+        valid_experiment_count += 1
+    else:
+        print("Discarding", filename)
+
+

@@ -1,0 +1,160 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision, rospy, rosbag, base64
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg    import String
+
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.dont_write_bytecode = True
+from graph_env  import *
+from policies   import *
+from load_graph import *
+
+#==============================================================================
+# PARAMS
+
+# the goal location at the center of the campus
+GOAL_ID = "60748"
+
+H = W = 1080
+B = 5
+T = 8 # thickness of lines in the plot
+
+DO_EMPIRICAL  = True
+DO_OPTIMAL    = True
+DO_SIMULATION = True
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = "graphs/entire-campus.pytorch",
+               vision_batch    = 128,
+               shifts          = 5,
+               shift_radians   = 0.07,
+               stride          = 3,
+               vision_init     = "places365",
+               workers         = 1,
+               noise_sigma     = 0.001,
+               noise_theta     = 0.15,
+               stutter_prob    = 0.01,
+               curr_levels     = 1,
+               curr_upd_int    = 1000,
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = -1,
+               bump_penalty    = 0,
+               elevator_radius = 5)
+env.curriculum_level = env.curriculum_levels-1 # start hardest
+_, _, prev_act, _, _ = env.reset()
+
+#==============================================================================
+# RUN
+
+if not os.path.exists("plots"): os.mkdir("plots")
+
+#==============================================================================
+# EMPIRICAL TRAJECTORIES
+#==============================================================================
+
+# transform node positions to workspace coordinates
+def topos(node,offset=0):
+    x,y = node["pose"][0:2]
+    if len(node["origin"]) == 3: dx,dy,dtheta = node["origin"]
+    else: dx, dy = node["origin"]; dtheta = 0
+    xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+    yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+    x = xr + dx; y = yr + dy
+    if type(offset) is not int: offset = np.matmul(np.array([[np.cos(-dtheta), -np.sin(-dtheta)],[np.sin(-dtheta), np.cos(-dtheta)]]), offset)
+    return np.array([x,y],np.float32) + offset
+
+if DO_EMPIRICAL:
+    img = None; start_locations = []
+    print("=== Empirical ===")
+    for i,filename in enumerate(sys.argv[1:]):
+        labelled_trajectory = torch.load(filename)
+
+        obs_sequence = labelled_trajectory["obs"]
+        img_sequence = labelled_trajectory["img"]
+        act_sequence = labelled_trajectory["act"]
+        loc_sequence = labelled_trajectory["loc"]
+        goal_id      = labelled_trajectory["gol"]
+
+        dist = 0; prev = None
+        for loc in loc_sequence:
+            pos = topos(env.graph["graph_nodes"][loc])
+            if prev is None: prev = pos
+            dist += np.linalg.norm(prev - pos)
+            prev = pos
+
+        print(i, filename, dist)
+
+
+#==============================================================================
+# OPTIMAL TRAJECTORIES
+#==============================================================================
+
+if DO_OPTIMAL:
+    all_lengths = []; G = nx.Graph()
+    for node_id,node in env.graph["graph_nodes"].items(): G.add_node(node_id)
+    for node_id,node in env.graph["graph_nodes"].items():
+        for (target_id,edge_type,edge_direction) in node["edges"]:
+            G.add_edge(node_id, str(target_id))
+            G.add_edge(str(target_id), node_id)
+    paths = dict(nx.all_pairs_shortest_path(G))
+
+    print("=== Optimal ===")
+    img = None; start_locations = []
+    for i,filename in enumerate(sys.argv[1:]):
+        labelled_trajectory = torch.load(filename)
+
+        obs_sequence = labelled_trajectory["obs"]
+        img_sequence = labelled_trajectory["img"]
+        act_sequence = labelled_trajectory["act"]
+        loc_sequence = labelled_trajectory["loc"]
+        goal_id      = labelled_trajectory["gol"]
+
+        print(i, filename, len(paths[str(loc_sequence[0])][str(goal_id)]))
+
+#==============================================================================
+# DRAW SIMULATION TRAJECTORIES
+#==============================================================================
+
+
+if DO_SIMULATION:
+    agent = ActorCritic(obs_space     = env.observation_space,
+                        act_space     = env.action_space,
+                        num_locations = env.num_locations,
+                        gamma         = 0.99,
+                        lr            = 1e-4,
+                        ent_weight    = 1e-1)
+
+    ckpt = torch.load("checkpoints/wintermute1528108143.35_frames_observed896006400")
+    agent.load_state_dict(ckpt["agent.state_dict"])
+
+    print("=== Simulation ===")
+    img = None; start_locations = []
+    for i,filename in enumerate(sys.argv[1:]):
+        labelled_trajectory = torch.load(filename)
+
+        obs_sequence = labelled_trajectory["obs"]
+        img_sequence = labelled_trajectory["img"]
+        act_sequence = labelled_trajectory["act"]
+        loc_sequence = labelled_trajectory["loc"]
+        goal_id      = labelled_trajectory["gol"]
+
+        start_num = env.location_to_id[str(loc_sequence[0])]
+        goal_num  = env.location_to_id[str(goal_id)]
+
+        rstate = agent.rec(1)
+        agent_loc_sequence = [loc_sequence[0]]
+        agent_obs, agent_goal, agent_prev_act, agent_location, agent_goal_id = env.reset(goal_loc=goal_num, start_loc=start_num)
+        env.workers_ep_limit[...] = 403*5 # max path length
+        while env.workers_done[0] < 0.5:
+            acts, all_probs, rstate = agent.act(agent_obs, agent_goal, agent_prev_act, rstate)
+            agent_obs, agent_goal, agent_prev_act, agent_rews, agent_dones, agent_diag_locs, agent_diag_goals = env.step(acts)
+            agent_loc_sequence.append(env.id_to_location[env.workers_location[0]])
+
+        print(i, filename, env.workers_motions[0])
+

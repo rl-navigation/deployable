@@ -1,0 +1,110 @@
+#! /usr/bin/env python2
+
+"""
+This script consumes tensorboard log files and creates reasonable-looking plots.
+"""
+
+from __future__ import print_function, division
+import sys, os, torch, scipy.signal, subprocess
+from tensorboard.backend.event_processing import event_accumulator
+
+# parameters for the savitzky-golay filter we use to smooth the mean
+SMOOTH_WINDOW = 10000
+SMOOTH_POLYORDER = 3
+
+# first command line argument is the directory containing all the runs
+top_level = sys.argv[1]
+
+# pass on the command line the list of run names you want to include
+run_names = sys.argv[2:]
+
+tag_to_plot = "solved_path_length/mean"
+
+if not os.path.exists("data" ): os.mkdir("data" )
+if not os.path.exists("plots"): os.mkdir("plots")
+
+tensorboard_data = {}
+for root, dirs, files in os.walk(top_level):
+    for events_file in files:
+        full_path = os.path.join(root, events_file)
+        if not any([name in full_path for name in run_names]): continue
+
+        cachefile = os.path.join("data", tag_to_plot.replace("/","_")+"."+events_file)
+        if os.path.exists(cachefile):
+            print("Loading from cachefile '{}'...".format(cachefile))
+            tensorboard_data[events_file] = torch.load(cachefile)
+        else:
+            print("Loading '{}'...".format(events_file))
+            ea = event_accumulator.EventAccumulator(full_path,
+                    size_guidance = {event_accumulator.COMPRESSED_HISTOGRAMS: 1,
+                                     event_accumulator.IMAGES: 1,
+                                     event_accumulator.AUDIO: 1,
+                                     event_accumulator.SCALARS: 0,
+                                     event_accumulator.HISTOGRAMS: 1})
+
+            ea.Reload()
+            tensorboard_data[events_file] = ea.Scalars(tag_to_plot)
+            torch.save(data[events_file], cachefile)
+
+
+# each run is a list of objects with .wall_time, .step, and .value
+datafiles = []
+for name, data in tensorboard_data.items():
+    datfile = "data/{}.{}.dat".format(tag_to_plot.replace("/","_"),name)
+    steps    = [event.step  for event in data]
+    values   = [event.value for event in data]
+    smoothed = scipy.signal.savgol_filter(values,window_length=SMOOTH_WINDOW//2*2+1,polyorder=SMOOTH_POLYORDER,axis=0)
+    with open(datfile, "w") as f:
+        f.write("\n".join(["{} {} {}".format(step, value, smooth) for step,value,smooth in zip(steps,values,smoothed)]))
+    datafiles.append(datfile)
+
+def name_run(filename):
+    names = {"1528616506" : "title \"Untrained\"",
+             "1528621080" : "notitle",
+             "1528678104" : "title \"Places365\"",
+             "1528678261" : "notitle",
+             "1528621081" : "title \"ImageNet\"",
+             "1528616460" : "notitle",
+            }
+    for key in names.keys():
+        if key in filename: return names[key]
+
+def color_run(filename):
+    colors = {
+              "1528616506" : ("#80ccaa33", "orange"),
+              "1528621080" : ("#80ccaa33", "orange"),
+              "1528616460" : ("#a0000099", "dark-blue"),
+              "1528621081" : ("#a0000099", "dark-blue"),
+              "1528678104" : ("#a0009900", "dark-green"),
+              "1528678261" : ("#a0009900", "dark-green"),
+             }
+    for key in colors.keys():
+        if key in filename: return colors[key]
+
+softline = ", ".join(["\"{datfile}\" using 1:2 w l      lc rgb \"{light_color}\" notitle".format(
+                      datfile=datfile,
+                      title=name_run(datfile),
+                      light_color=color_run(datfile)[0],
+                      dark_color=color_run(datfile)[1])
+                     for datfile in sorted(datafiles, key=lambda d: name_run(d))])
+
+hardline = ", ".join(["\"{datfile}\" using 1:3 w l lw 5 lc rgb \"{dark_color}\" {title}".format(
+                      datfile=datfile,
+                      title=name_run(datfile),
+                      light_color=color_run(datfile)[0],
+                      dark_color=color_run(datfile)[1])
+                     for datfile in sorted(datafiles, key=lambda d: name_run(d))])
+
+gnuplot_cmd = """
+    set terminal pdfcairo enhanced font "ComputerModern,20";
+    set output "plots/{}.pdf";
+    set xrange [0:1000000000];
+    set yrange [0:220];
+    set xtics ("0" 0, "200M" 200000000, "400M" 400000000, "600M" 600000000, "800M" 800000000, "1B" 1000000000);
+    set xlabel "Timesteps in Environment";
+    set ylabel "Solved Path Length";
+    plot {}, {};
+    """.format(tag_to_plot.replace("/","_"), softline, hardline)
+
+subprocess.call(["gnuplot", "-e", gnuplot_cmd])
+

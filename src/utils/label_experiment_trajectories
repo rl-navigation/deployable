@@ -1,0 +1,197 @@
+#! /usr/bin/env python2
+
+"""
+This script allows the human to roughly annotate real datasets with their trajectories through
+the graph. This is important because we don't actually have any metric localisation on this robot.
+"""
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision, rospy, rosbag, base64
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg    import String
+
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.dont_write_bytecode = True
+from graph_env  import *
+from policies   import *
+from load_graph import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--datafile", "", "Pytorch file containing the navigation graph")
+arg("--bagfile",  "", "ROS bag file containing the recording of the experiment")
+argvalidate()
+from args import *
+
+# location near the center of campus
+GOAL_ID = "60748"
+
+H = W = 1080
+B = 25
+MIN_DIST = 20
+
+# dynamic mouse status
+X = 0
+Y = 0
+CLICKED = False
+
+bagtag = os.path.basename(BAGFILE).replace(".","_")
+if os.path.exists("data/{}_labeled_trajectory.pytorch".format(bagtag)):
+    print("Labelled bag already exists. Quitting.")
+    sys.exit(0)
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = 128,
+               shifts          = 0,
+               shift_radians   = 0,
+               stride          = 3,
+               vision_init     = "places365",
+               workers         = 1,
+               noise_sigma     = 0.0,
+               noise_theta     = 0.0,
+               stutter_prob    = 0.0,
+               curr_levels     = 1,
+               curr_upd_int    = 1000,
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = 1,
+               bump_penalty    = 0,
+               elevator_radius = 1)
+env.curriculum_level = env.curriculum_levels-1 # start hardest
+_, _, prev_act, _, _ = env.reset()
+
+#==============================================================================
+# HELPERS
+
+def handle_mouse(event, x, y, *rest):
+    global X, Y, CLICKED
+    X = x; Y = y
+    if event == cv2.EVENT_LBUTTONDOWN: CLICKED = True
+
+#------------------------------------------------------------------------------
+
+def label_loc(img_obs):
+    global X,Y,CLICKED
+
+    # transform node positions to workspace coordinates
+    def topos(node,offset=0):
+        x,y = node["pose"][0:2]
+        if len(node["origin"]) == 3: dx,dy,dtheta = node["origin"]
+        else: dx, dy = node["origin"]; dtheta = 0
+        xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+        yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+        x = xr + dx; y = yr + dy
+        if type(offset) is not int: offset = np.matmul(np.array([[np.cos(-dtheta), -np.sin(-dtheta)],[np.sin(-dtheta), np.cos(-dtheta)]]), offset)
+        return np.array([x,y],np.float32) + offset
+
+    # determine the size of the workspace
+    poses = [topos(node) for node in env.graph["graph_nodes"].values()]
+    poses = np.array(poses)
+    xmn = poses[:,0].min(); xmx = poses[:,0].max(); xgp = xmx-xmn
+    ymn = poses[:,1].min(); ymx = poses[:,1].max(); ygp = ymx-ymn
+    if   ygp > xgp: xmn-=(ygp-xgp)/2; xmx+=(ygp-xgp)/2
+    elif xgp > ygp: ymn-=(xgp-ygp)/2; ymx+=(xgp-ygp)/2
+    def topix(x,y): return (int((x-xmn)/(xmx-xmn+1e-8)*(W-2*B)+B), H-int((y-ymn)/(ymx-ymn+1e-8)*(H-2*B)+B))
+
+    def draw_map():
+        img = np.full((H,W,3), 255, np.uint8)
+        # draw edges first
+        for node_id,node in env.graph["graph_nodes"].items():
+            for target_id,edge_type,edge_direction in node["edges"]:
+                p1 = topix(*topos(node)); p2 = topix(*topos(env.graph["graph_nodes"][str(target_id)]))
+                cv2.line(img, p1, p2, (0,0,0), 1)
+        # draw nodes
+        for node_id,node in env.graph["graph_nodes"].items():
+            cv2.circle(img, topix(*topos(node)), 2, (255,0,0), -1)
+        return img
+
+    img_map_orig = draw_map()
+    img_selected = np.full(img_obs.shape, 255, np.uint8)
+
+    while True:
+        img_map = img_map_orig.copy()
+        pix_locs = [topix(*pose[:2]) for pose in poses]
+        dists = np.linalg.norm(np.array(pix_locs)-[X,Y], axis=1)
+        closest_idx  = np.argmin(dists)
+        closest_dist = dists[closest_idx]
+        if closest_dist < MIN_DIST:
+            closest_node = list(env.graph["graph_nodes"].values())[closest_idx]
+            cv2.circle(img_map, topix(*topos(closest_node)), 4, (0,255,0), 2)
+
+            if CLICKED:
+                CLICKED = False
+                print("Returning selected node '{}'".format(closest_node["id"]))
+                return str(closest_node["id"])
+
+            img_selected = cv2.imdecode(np.fromstring(closest_node["frame"], np.uint8), cv2.IMREAD_COLOR)
+            img_selected = polar_to_cartesian(img_selected, theta=0, **unwrapping_parameters)
+        else: CLICKED = False
+
+        cv2.imshow("compare",  np.vstack([img_selected, img_obs]))
+        cv2.imshow("label",    img_map)
+        cv2.waitKey(30)
+
+#==============================================================================
+# RUN
+
+unwrapping_parameters = env.graph["unwrapping_parameters"]
+
+print("Reading experiment from bagfile...")
+img = None
+obs_sequence = []; act_sequence = [prev_act]; img_sequence = []
+for topic, msg, t in rosbag.Bag(BAGFILE).read_messages():
+    if topic == "/nav_agent/gol":
+        goal = base64.decodestring(msg.data)
+        goal = np.frombuffer(goal, dtype=np.float32)
+
+    if topic == "/nav_agent/obs":
+        if img is not None:
+            obs  = base64.decodestring(msg.data)
+            obs  = np.frombuffer(obs,  dtype=np.float32)
+
+            img  = cv2.imdecode(np.fromstring(img, np.uint8), cv2.IMREAD_COLOR)
+            if img is not None:
+                img  = polar_to_cartesian(img, theta=0, **unwrapping_parameters)
+                obs_sequence.append(obs)
+                img_sequence.append(img)
+
+    if topic == "/nav_agent/act":
+        act  = base64.decodestring(msg.data)
+        act  = np.frombuffer(act,  dtype=np.float32)
+        act_sequence.append(act)
+
+    if topic == "/nav_agent/prb":
+        prb  = base64.decodestring(msg.data)
+        prb  = np.frombuffer(prb,  dtype=np.float32)
+
+    if topic == "/firecam/image_raw/compressed":
+        img  = msg.data
+
+print("Read {} observations, {} actions".format(len(obs_sequence), len(act_sequence)))
+
+locdir = "data/loc/{}".format(bagtag)
+
+if not os.path.exists("data"    ): os.mkdir("data"    )
+if not os.path.exists("data/loc"): os.mkdir("data/loc")
+if not os.path.exists(locdir    ): os.mkdir(locdir    )
+
+print("Labeling trajectory...")
+cv2.namedWindow("label")
+cv2.setMouseCallback("label", handle_mouse)
+node_sequence = []
+for step,(obs,img_obs,prev_act) in enumerate(zip(obs_sequence, img_sequence, act_sequence)):
+    current_loc = label_loc(img_obs)
+    node_sequence.append(current_loc)
+
+torch.save({"obs" : obs_sequence,
+            "img" : img_sequence,
+            "act" : act_sequence,
+            "loc" : node_sequence,
+            "gol" : GOAL_ID}, "data/{}_labeled_trajectory.pytorch".format(bagtag))
+

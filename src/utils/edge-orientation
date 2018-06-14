@@ -1,0 +1,160 @@
+#! /usr/bin/env python2
+
+"""
+This script takes a navigable graph file produced by the graph-gui tool, and assigns relative
+directions to each edge. Natural edges are oriented according to the robot's odometry, and
+local edges are oriented with human intervention. Nonlocal edges are not oriented, because they
+represent teleports such as elevators.
+"""
+
+from __future__ import print_function, division
+import os, sys, numpy as np, cv2, torch, math
+from operator import itemgetter as ig
+
+sys.dont_write_bytecode = True
+this_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(this_dir, ".."))
+from load_graph import polar_to_cartesian
+
+
+WINDOW_DIST = 30
+
+
+def draw_map(graph, from_node, to_node, backward):
+    W = H = 600; B = 50
+    img = np.full((H,W,3), 255, np.uint8)
+
+    # transform node positions to workspace coordinates
+    def topos(node,offset=0):
+        x,y = node["pose"][0:2]
+        if len(node["origin"]) == 3: dx,dy,dtheta = node["origin"]
+        else: dx, dy = node["origin"]; dtheta = 0
+        xr = x*np.cos(dtheta) + y*np.sin(dtheta)
+        yr = x*np.cos(dtheta+np.pi/2) + y*np.sin(dtheta+np.pi/2)
+        x = xr + dx
+        y = yr + dy
+        if type(offset) is not int: offset = np.matmul(np.array([[np.cos(-dtheta), -np.sin(-dtheta)],[np.sin(-dtheta), np.cos(-dtheta)]]), offset)
+        return np.array([x,y],np.float32) + offset
+
+    poses = [topos(node) for node in graph["graph_nodes"].values() if np.linalg.norm(topos(node)-topos(from_node))<WINDOW_DIST
+                                                                   or np.linalg.norm(topos(node)-topos(  to_node))<WINDOW_DIST]
+    poses = np.array(poses)
+    xmn = poses[:,0].min(); xmx = poses[:,0].max(); xgp = xmx-xmn
+    ymn = poses[:,1].min(); ymx = poses[:,1].max(); ygp = ymx-ymn
+    if   ygp > xgp: xmn-=(ygp-xgp)/2; xmx+=(ygp-xgp)/2
+    elif xgp > ygp: ymn-=(xgp-ygp)/2; ymx+=(xgp-ygp)/2
+    def topix(x,y): return (int((x-xmn)/(xmx-xmn+1e-8)*(W-2*B)+B), H-int((y-ymn)/(ymx-ymn+1e-8)*(H-2*B)+B))
+    # draw nodes
+    for node_id,node in graph["graph_nodes"].items():
+        cv2.circle(img, topix(*topos(node)), 5, (255,0,0), -1)
+    # draw edges
+    for node_id,node in graph["graph_nodes"].items():
+        for edge in node["edges"]:
+            target_node = graph["graph_nodes"][str(edge[0])]
+            if   edge[1] == "natural" : color = (0,0,0)
+            elif edge[1] == "local"   : color = (255,0,255)
+            elif edge[1] == "nonlocal": color = (255,255,0)
+            if len(edge) ==          3: color = (128,128,128)
+            if node is from_node and target_node is   to_node: color = (0,128,0)
+            if node is   to_node and target_node is from_node: color = (0,128,0)
+            cv2.line(img, topix(*topos(node)), topix(*topos(target_node)), color, 2)
+    # draw from
+    cv2.circle(img, topix(*topos(from_node)), 8, (0,255,0), 3)
+    vector = np.array([np.cos(from_node["pose"][3]+backward*-np.pi/2), np.sin(from_node["pose"][3]+backward*-np.pi/2)])
+    cv2.line(img, topix(*topos(from_node)), topix(*topos(from_node,vector*2)), (128,255,0), 3)
+    # draw to
+    cv2.circle(img, topix(*topos(to_node)), 8, (0,128,255), 2)
+
+    cv2.putText(img, "from node", (20,25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,  0), 2)
+    cv2.putText(img, "to node",   (20,50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,128,255), 2)
+    cv2.putText(img, "backward={}".format(backward), (20,75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,64), 2)
+
+    return img
+
+
+
+def hand_label(from_node, to_node, disallowed, graph):
+    # select out direction
+    key = None
+    backward = 0
+    while key != ord(' '):
+        frame1 = polar_to_cartesian(cv2.imdecode(from_node["frame"], cv2.IMREAD_COLOR), theta=-np.pi/2*backward, **unwrapping_parameters)
+        frame2 = polar_to_cartesian(cv2.imdecode(  to_node["frame"], cv2.IMREAD_COLOR), theta=0, **unwrapping_parameters)
+        for frame in [frame1,frame2]:
+            for quadrant in range(3):
+                cv2.line(frame, (frame.shape[1]*(quadrant+1)//4,0), (frame.shape[1]*(quadrant+1)//4,frame.shape[0]), (0,0,0), 1)
+        cv2.putText(frame1, "rotate (q,e) to select forward", (30,30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
+        if (backward+2)%4 not in disallowed: cv2.putText(frame1, "forward",       (frame1.shape[1]*(1+2*2)//8-30,                     frame1.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+        for direction         in disallowed: cv2.putText(frame1, "edge occupied", (frame1.shape[1]*(1+(direction-backward)%4*2)//8-60,frame1.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+        both = np.vstack([frame1,frame2])
+        map_img = draw_map(graph, from_node, to_node, backward)
+        both = cv2.resize(both, dsize=None, fx=map_img.shape[0]/both.shape[0], fy=map_img.shape[0]/both.shape[0], interpolation=cv2.INTER_NEAREST)
+        img = np.hstack([map_img, both])
+        cv2.imshow("viz", img)
+        key = cv2.waitKey(0) & 0xff
+        if key == ord('q'): backward = (backward-1)%4
+        if key == ord('e'): backward = (backward+1)%4
+    outdir = (backward+2)%4
+
+    if outdir in disallowed:
+        print("Already used {}".format(disallowed))
+        if len(disallowed) >= 4: return outdir
+        else: return hand_label(from_node, to_node, disallowed)
+
+    return outdir
+
+
+
+infile = sys.argv[1]
+outfile = infile.replace(".pytorch",".edge_orientation.pytorch")
+
+
+
+graph = torch.load(infile)
+
+unwrapping_parameters = graph["unwrapping_parameters"]
+
+for node_id in sorted(graph["graph_nodes"].keys()):
+    node  = graph["graph_nodes"][node_id]
+    edges = set()
+
+    for tid,etype in node["edges"]:
+        if   etype == "natural":
+            pose1 = ig(0,1,3)(node["pose"])
+            pose2 = ig(0,1,3)(graph["graph_nodes"][str(tid)]["pose"])
+
+            # outgoing direction
+            pos1to2   = [pose2[0]-pose1[0], pose2[1]-pose1[1]]
+            theta1    = pose1[2]
+            theta2    = np.arctan2(pos1to2[1], pos1to2[0])
+            theta1to2 = theta2-theta1
+            theta1to2 = np.arctan2(np.sin(theta1to2), np.cos(theta1to2))
+            if abs(theta1to2) < np.pi/4                         : outdir = 2
+            elif theta1to2 < -np.pi/4 and theta1to2 > -3*np.pi/4: outdir = 3
+            elif theta1to2 >  np.pi/4 and theta1to2 <  3*np.pi/4: outdir = 1
+            else                                                : outdir = 0
+
+            if outdir in [e[2] for e in edges if e[2] is not None]:
+                print("WARNING, already used outdir='{}' for node '{}'".format(outdir, node["id"]))
+            edges.add((tid,etype,outdir))
+
+    for tid,etype in node["edges"]:
+        if etype == "local":
+            outdir = hand_label(node, graph["graph_nodes"][str(tid)], [e[2] for e in edges], graph)
+            if outdir in [e[2] for e in edges if e[2] is not None]:
+                print("WARNING, already used outdir='{}' for node '{}'".format(outdir, node["id"]))
+            edges.add((tid,etype,outdir))
+
+    for tid,etype in node["edges"]:
+        if etype == "nonlocal":
+            outdir = None
+            if outdir in [e[2] for e in edges if e[2] is not None]:
+                print("WARNING, already used outdir='{}' for node '{}'".format(outdir, node["id"]))
+            edges.add((tid,etype,outdir))
+
+    node["edges"] = edges
+
+cv2.destroyAllWindows()
+torch.save(graph, outfile)
+
+

@@ -1,0 +1,218 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision, glob, traceback
+
+sys.dont_write_bytecode = True
+from graph_env     import *
+from policies      import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--datafile",        "",            "[REQUIRED] File containing the navigation graph, produced by scripts in /utils")
+arg("--seed",            -1,            "Pseudorandom number generator seed (random if not set)")
+arg("--bump_penalty",    0.0,           "Amount of negative reward when bumping into a wall")
+arg("--vision_batch",    128,           "Batch size to use when preprocessing images; lower numbers use less VRAM")
+arg("--vision_init",     "places365",   "Initialization for vision network: imagenet, places365, or untrained")
+arg("--shifts",          5,             "Number of different rotations for stochastic observations")
+arg("--shift_radians",   0.07,          "Number of radians to rotate the image for each shift increment")
+arg("--elevator_radius", 1,             "Max distance away from an elevator node where the elevator action is valid")
+arg("--noise_sigma",     0.01,          "Scale of the fluctuations on the Ornstein-Uhlenbeck global input-space noise")
+arg("--noise_theta",     0.15,          "Scale of the decay on the Ornstein-Uhlenbeck global input-space noise")
+arg("--stride",          3,             "Stride of pooling in vision; 1 is full overlap, 3 is 1/2 overlap, 7 is no overlap")
+arg("--stutter_prob",    0.05,          "Probability of a forward motion failing (nonzero values rule out open-loop memorization)")
+arg("--curr_levels",     100,           "The number of discrete levels of curriculum for gradually ramping difficulty")
+arg("--curr_upd_int",    100,           "The period at which we check if the curriculum is too easy")
+arg("--curr_thresh",     0.8,           "The fraction of successful trajectories required in order to increment the curriculum")
+arg("--gamma",           0.99,          "Discount factor for future rewards")
+arg("--ent_weight",      0.0005,        "Weight of the entropy loss")
+arg("--lr",              0.0001,        "Learning rate of the optimizer")
+arg("--num_frames",      1e10,          "Total number of frames to run the experiment for")
+arg("--log_dir",         "runs",        "Directory in which to save tensorboard logs")
+arg("--ckpt_int",        5000,          "Interval to save checkpoints. -1 means none.")
+arg("--ckpt_dir",        "checkpoints", "Where to save periodic checkpoints")
+arg("--load_ckpt",       "",            "Checkpoint file to load and resume from")
+arg("--comment",         "",            "Comment that does not do anything (for labelling runs)")
+arg("--workers",         128,           "Number of parallel worker agents")
+arg("--rollout",         50,            "Length of each rollout in timesteps")
+arg("--no_log",          None,          "Don't save tensorboard logs")
+arg("--load_latest",     None,          "Load the most recent checkpoint in the ckpt_dir")
+arg("--load_hypers",     None,          "When loading a checkpoint, load its hyperparameters as well")
+argvalidate()
+from args import *
+
+#==============================================================================
+# GENERAL SETUP
+
+# keep track of our sourcecode so we can include it in checkpoints
+sourcecode = {}
+for sourcefile in ["train", "policies.py", "graph_env.py", "load_graph.py"]:
+    with open(sourcefile, "r") as f: sourcecode[sourcefile] = f.read()
+
+# if we want to load the most recent checkpoint, then figure out what that is and set it
+if LOAD_LATEST:
+    ckpts       = glob.glob('{}/*'.format(CKPT_DIR))
+    ckpt_latest = max(ckpts, key=os.path.getctime)
+    LOAD_CKPT = HYPERS["--load_ckpt"] = ckpt_latest
+
+# potentially load hyperparameters from a checkpoint
+if LOAD_CKPT != "":
+    checkpoint = torch.load(LOAD_CKPT)
+    if LOAD_HYPERS and "hyperparameters" in checkpoint:
+        HYPERS.update(checkpoint["hyperparameters"])
+
+# random seeds for reproducibility
+if SEED < 0: SEED = int(time.time()*1000)%(10000); HYPERS["--seed"] = SEED
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = VISION_BATCH,
+               shifts          = SHIFTS,
+               shift_radians   = SHIFT_RADIANS,
+               stride          = STRIDE,
+               vision_init     = VISION_INIT,
+               elevator_radius = ELEVATOR_RADIUS,
+               workers         = WORKERS,
+               stutter_prob    = STUTTER_PROB,
+               noise_sigma     = NOISE_SIGMA,
+               noise_theta     = NOISE_THETA,
+               curr_levels     = CURR_LEVELS,
+               curr_upd_int    = CURR_UPD_INT,
+               curr_thresh     = CURR_THRESH,
+               bump_penalty    = BUMP_PENALTY,
+               headless        = True,
+               max_variations  = -1)
+
+#==============================================================================
+# AGENT SETUP
+
+agent = ActorCritic(obs_space     = env.observation_space,
+                    act_space     = env.action_space,
+                    num_locations = env.num_locations,
+                    gamma         = GAMMA,
+                    lr            = LR,
+                    ent_weight    = ENT_WEIGHT)
+
+rstate = agent.rec(WORKERS)
+
+#==============================================================================
+# LOAD CHECKPOINT
+
+ckpt_frames = 0
+if LOAD_CKPT != "":
+    ckpt_sourcecode  = checkpoint["sourcecode"]       # source code of each file when this ckpt was made
+    ckpt_args        = checkpoint["args"]             # arguments passed to the program for this ckpt
+    ckpt_versions    = checkpoint["versions"]         # library versions used to make this ckpt
+    ckpt_frames      = checkpoint["frames_observed"]  # how many frames the ckpt has seen, so we can resume
+    ckpt_state_dict  = checkpoint["agent.state_dict"] # all the state required to resume the agent and training
+    agent.load_state_dict(ckpt_state_dict)
+
+    env.workers_eplength[...] = checkpoint["episode_length"     ] # mean episode length achieved by the ckpt
+    env.workers_epreward[...] = checkpoint["episode_reward"     ] # mean episode reward achieved by the ckpt
+    env.workers_opfrac  [...] = checkpoint["fraction_of_optimal"] # mean fraction of the optimal performance the ckpt reached
+    env.workers_epsuclen[...] = checkpoint["solved_path_length" ] # mean reward * path length
+
+#==============================================================================
+# TENSORBOARD LOGS
+
+LOG = not NO_LOG
+run_tag = str(socket.gethostname())+str(time.time())
+if LOG:
+    log_dir = os.path.join(LOG_DIR, "running", run_tag, *["{}{}".format(k.replace("-",""),v) for k,v in HYPERS.items()])
+    writer = tensorboardX.SummaryWriter(log_dir=log_dir)
+
+#==============================================================================
+# RUN
+
+for rollout_number in xrange(int(NUM_FRAMES)//(WORKERS*ROLLOUT)):
+    st = time.time()
+    rstate = rstate0 = agent.rec_detach(rstate)
+    rollout = []
+    action_probabilities = []
+    for rollout_t in range(ROLLOUT):
+        # reset environment for workers who are done
+        obs, goals, pacts, diag_locs, diag_goals = env.reset()
+
+        # potentially increase the curriculum
+        env.update_curriculum_level()
+
+        # choose actions
+        acts, all_probs, rstate = agent.act(obs, goals, pacts, rstate)
+        action_probabilities.append(all_probs)
+
+        # take actions in environment
+        nobs, ngoals, npacts, rews, dones, ndiag_locs, ndiag_goals = env.step(acts)
+
+        # add transition to rollout
+        rollout.append(Transition(obs   = obs,
+                                  goals = goals,
+                                  pacts = pacts,
+                                  acts  = acts,
+                                  rews  = rews,
+                                  nobs  = nobs,
+                                  dones = dones,
+                                  diag_locs  = diag_locs,
+                                  diag_goals = diag_goals))
+
+        # roll state over to the next timestep
+        obs        = nobs       .copy()
+        goals      = ngoals     .copy()
+        pacts      = npacts     .copy()
+        diag_locs  = ndiag_locs .copy()
+        diag_goals = ndiag_goals.copy()
+
+        # mask the recurrent state for workers who are done
+        rstate = agent.rec_mask(rstate, dones)
+
+    v_final = agent.value(obs, goals, pacts, rstate)
+    metrics = agent.train(rollout, rstate0, v_final)
+    print(metrics)
+
+    frames_observed = ckpt_frames + (rollout_number+1)*ROLLOUT*WORKERS
+    if LOG:
+        def logstats(label, array, step):
+            [writer.add_scalar("{}/{}".format(label, fn), eval("np.{}".format(fn))(array), step)
+             for fn in ["min","max","mean","std"]]
+
+        logstats("length",              env.workers_eplength, frames_observed)
+        logstats("reward",              env.workers_epreward, frames_observed)
+        logstats("fraction_of_optimal", env.workers_opfrac,   frames_observed)
+        logstats("solved_path_length",  env.workers_epsuclen, frames_observed)
+        logstats("noise",               env.workers_noise,    frames_observed)
+
+        action_probabilities = np.array(action_probabilities)
+        for act_idx in range(env.action_space.n): writer.add_scalar("action_probabilities/{}".format(act_idx), action_probabilities[...,act_idx].mean(), frames_observed)
+
+        metrics["metrics/fps"        ] = WORKERS*ROLLOUT/(time.time()-st)
+        metrics["metrics/rps"        ] = 1.0/(time.time()-st)
+        metrics["metrics/curriculum" ] = (env.curriculum_level+1)/float(env.curriculum_levels)
+        metrics["metrics/ngoals_mean"] = np.mean(env.goals_available[env.curriculum_level])
+        metrics["metrics/ngoals_std" ] = np.std (env.goals_available[env.curriculum_level])
+        for k,v in metrics.items(): writer.add_scalar(k, v, frames_observed)
+
+    if CKPT_INT>0 and (rollout_number%CKPT_INT==0 or rollout_number==(int(NUM_FRAMES)//(WORKERS*ROLLOUT)-1)):
+        if not os.path.exists(CKPT_DIR): os.mkdir(CKPT_DIR)
+        versions = {library: eval("{}.__version__".format(library)) for library in ["torch", "np", "cv2", "skimage", "torchvision"]}
+        checkpoint = {"sourcecode"          : sourcecode,
+                      "args"                : sys.argv,
+                      "versions"            : versions,
+                      "frames_observed"     : frames_observed,
+                      "hyperparameters"     : HYPERS,
+                      "fraction_of_optimal" : np.mean(env.workers_opfrac  ),
+                      "episode_length"      : np.mean(env.workers_eplength),
+                      "episode_reward"      : np.mean(env.workers_epreward),
+                      "solved_path_length"  : np.mean(env.workers_epsuclen),
+                      "agent.state_dict"    : agent.state_dict()}
+        torch.save(checkpoint, os.path.join(CKPT_DIR, "{}_frames_observed{}".format(run_tag, frames_observed)))
+
+# now move the directory so we know it's complete
+if LOG:
+    import shutil
+    if not os.path.exists(os.path.join(LOG_DIR, "completed")): os.mkdir(os.path.join(LOG_DIR, "completed"))
+    shutil.move(os.path.join(LOG_DIR, "running", run_tag), os.path.join(LOG_DIR, "completed", run_tag))
+

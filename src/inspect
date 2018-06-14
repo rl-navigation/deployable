@@ -1,0 +1,134 @@
+#! /usr/bin/env python2
+
+from __future__ import print_function, division
+import numpy as np, sys, os, time, tensorboardX, copy, socket, torch, skimage, cv2, torchvision
+
+sys.dont_write_bytecode = True
+from graph_env import *
+from policies  import *
+
+#==============================================================================
+# PARAMS
+
+from args import arg, argvalidate
+arg("--datafile",       "",            "[REQUIRED] Pytorch file containing the navigation graph")
+arg("--seed",           -1,            "Pseudorandom number generator seed")
+arg("--vision_batch",   256,           "Batch size to use when preprocessing images; lower numbers use less VRAM")
+arg("--shifts",         5,             "Number of different rotations for stochastic observations")
+arg("--shift_radians",  0.07,          "Number of radians to rotate the image for each shift increment")
+arg("--noise_sigma",    0.005,         "Scale of the O-U noise on the pixels")
+arg("--noise_theta",    0.15,          "Decay of the O-U noise on the pixels")
+arg("--stutter_prob",   0.0,           "Probability of failing to move forward")
+arg("--stride",         3,             "Stride of pooling in vision; 1 is full overlap, 3 is 1/2 overlap, 7 is no overlap")
+arg("--vision_init",    "places365",   "Initialization for vision network: imagenet, places365, or untrained")
+arg("--curr_levels",    100,           "The number of discrete levels of curriculum for gradually ramping difficulty")
+arg("--workers",        128,           "Number of workers to run (even though we only see one)")
+arg("--save_images",    "",            "Directory to save images for making a video")
+arg("--load_ckpt",      "",            "Existing agent to load")
+arg("--load_latest",    None,          "Load the most recent checkpoint in the ckpt_dir")
+arg("--load_hypers",    None,          "When loading a checkpoint, load its hyperparameters as well")
+arg("--deterministic",  None,          "Use a deterministic policy, always selecting the argmax of the logits")
+arg("--headless",       None,          "Save images only, don't render in a window")
+argvalidate()
+from args import *
+
+#==============================================================================
+# GENERAL SETUP
+
+# make a directory for saving images
+if SAVE_IMAGES != "" and not os.path.exists(SAVE_IMAGES): os.mkdir(SAVE_IMAGES)
+
+# if we want to load the most recent checkpoint, then figure out what that is and set it
+if LOAD_LATEST:
+    ckpts       = glob.glob('{}/*'.format(CKPT_DIR))
+    ckpt_latest = max(ckpts, key=os.path.getctime)
+    LOAD_CKPT = HYPERS["--load_ckpt"] = ckpt_latest
+
+# potentially load hyperparameters from a checkpoint
+if LOAD_CKPT != "":
+    checkpoint = torch.load(LOAD_CKPT)
+    if LOAD_HYPERS and "hyperparameters" in checkpoint:
+        HYPERS.update(checkpoint["hyperparameters"])
+
+if SEED < 0: SEED = int(time.time()*1000)%(10000); HYPERS["--seed"] = SEED
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+
+#==============================================================================
+# ENVIRONMENT SETUP
+
+env = GraphEnv(datafile        = DATAFILE,
+               vision_batch    = VISION_BATCH,
+               shifts          = SHIFTS,
+               shift_radians   = SHIFT_RADIANS,
+               stride          = STRIDE,
+               vision_init     = VISION_INIT,
+               workers         = WORKERS,
+               noise_sigma     = NOISE_SIGMA,
+               noise_theta     = NOISE_THETA,
+               stutter_prob    = STUTTER_PROB,
+               curr_levels     = CURR_LEVELS,
+               curr_upd_int    = 100000, # don't update the curriculum
+               curr_thresh     = 1,
+               headless        = False,
+               max_variations  = -1,
+               bump_penalty    = 0,
+               elevator_radius = 5)
+env.curriculum_level = env.curriculum_levels-1 # start hardest
+env.reset()
+
+#==============================================================================
+# AGENT SETUP
+
+agent = ActorCritic(obs_space     = env.observation_space,
+                    act_space     = env.action_space,
+                    num_locations = env.num_locations,
+                    gamma         = 0.99,
+                    lr            = 1e-4,
+                    ent_weight    = 1e-1)
+
+rstate = agent.rec(WORKERS)
+
+#==============================================================================
+# LOAD CHECKPOINT
+
+if LOAD_CKPT != "":
+    ckpt_state_dict  = checkpoint["agent.state_dict"] # all the state required to resume the agent and training
+    agent.load_state_dict(ckpt_state_dict)
+
+#==============================================================================
+# RUN
+
+if not os.path.exists("data"): os.mkdir("data")
+
+visit_count = np.zeros((env.num_locations,), np.int64)
+performance_by_length = [[] for _ in range(404)]
+all_probs = [None]*WORKERS
+with torch.no_grad():
+    for step in xrange(int(1e10)):
+        #key, img = render(mode="rgb_array" if HEADLESS else "human", wait=1, action_probs=all_probs[0])
+        #if SAVE_IMAGES != "": cv2.imwrite("{}/{:06d}.png".format(SAVE_IMAGES, step), img)
+
+        # keep track of how many times the agent visits each node
+        visit_count[env.workers_location] += 1
+
+        # reset environment for workers who are done
+        obs, goals, pact, diag_locs, diag_goals = env.reset()
+        env.workers_ep_limit[...] = 403*5 # maximum time limit
+
+        # choose actions
+        acts, all_probs, rstate = agent.act(obs, goals, pact, rstate, deterministic=DETERMINISTIC)
+
+        # take actions and add transition to rollout
+        nobs, ngoals, npact, rews, dones, ndiag_locs, ndiag_goals = env.step(acts)
+
+        for wd in np.where(np.logical_and(dones>0.5, rews>0.01))[0]:
+            performance_by_length[int(env.workers_oplength[wd])].append(env.workers_motions[wd])
+
+        # mask the recurrent state for workers who are done
+        rstate = agent.rec_mask(rstate, dones)
+
+        if step % 1000 == 0:
+            tag = LOAD_CKPT.replace("/","_")
+            torch.save(visit_count,           "data/{}_visit_count.pytorch"          .format(tag))
+            torch.save(performance_by_length, "data/{}_performance_by_length.pytorch".format(tag))
+

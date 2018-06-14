@@ -1,0 +1,76 @@
+#! /usr/bin/env python2
+
+import torch, numpy as np, subprocess
+
+pbl = torch.load("data/checkpoints_wintermute1528108143.35_frames_observed896006400_performance_by_length.pytorch")
+
+
+# plot the scatterplot
+
+with open("/tmp/pbl.dat", "w") as f:
+    for l,p in enumerate(pbl):
+        if len(p) > 1:
+            perf_mean = np.mean      ([pi for pi in p if pi >= l])
+            perf_bot  = np.percentile([pi for pi in p if pi >= l], q=25,   axis=0)
+            perf_top  = np.percentile([pi for pi in p if pi >= l], q=75,   axis=0)
+            perf_min  = np.percentile([pi for pi in p if pi >= l], q=2.5,  axis=0)
+            perf_max  = np.percentile([pi for pi in p if pi >= l], q=97.5, axis=0)
+            f.write("{} {} {} {} {} {}\n".format(l, perf_mean, perf_bot, perf_top, perf_min, perf_max))
+
+gnuplot_cmd = """
+    set terminal pdfcairo enhanced font "ComputerModern,20";
+    set output "plots/performance_by_length.pdf";
+    set xlabel "Optimal Length";
+    set ylabel "Agent Episode Length";
+    set yrange [0:800];
+    plot x                          with lines        lc rgb "#00AA1144" lw 8 title "Oracle",
+         "/tmp/pbl.dat" using 1:3:4 with filledcurves lc rgb "#404444CC" notitle,
+         ""             using 1:5:6 with filledcurves lc rgb "#804444CC" notitle,
+         ""             using 1:2   with lines        lc rgb "#00111177" lw 3 title "Training",
+         "data/real_performance_vs_length.dat" using 1:2 with points pointtype 25 ps 1.5 lw 3 lc rgb "#00115511" title "Deployment"
+        ;
+"""
+
+subprocess.call(["gnuplot", "-e", gnuplot_cmd])
+
+
+
+# plot the histogram
+
+ratios = []
+for l,p in enumerate(pbl):
+    ratios.extend([v/float(l+1) for v in p if v/float(l+1)<3 and v/float(l+1)>1.1])
+counts, bins = np.histogram(np.array(ratios), bins=32)
+
+print("Mean ratio:", np.mean(ratios))
+
+with open("/tmp/pbl_hist.dat", "w") as f: f.write("\n".join(["{} {}".format(b,c) for b,c in zip(bins,counts)]))
+
+# this gnuplot command includes code to break the axis midway with a somewhat pleasant look
+gnuplot_cmd = """
+    set terminal pdfcairo enhanced font "ComputerModern,20";
+    set output "plots/performance_by_length_histogram.pdf";
+    set xlabel "Ratio of Agent Length to Optimal Length";
+    set ylabel "Frequency";
+    unset ytics;
+    set yrange [0:15000];
+    set xrange [1:4.6];
+    set style fill solid 0.5;
+    set border 2+8;
+    set arrow 1 from 3.35,-500  to 3.45,500   nohead;
+    set arrow 2 from 3.45,-500  to 3.55,500   nohead;
+    set arrow 3 from 3.35,14500 to 3.45,15500 nohead;
+    set arrow 4 from 3.45,14500 to 3.55,15500 nohead;
+    set arrow 5 from 1,15000    to 3.4,15000  nohead;
+    set arrow 6 from 3.5,15000  to 4.6,15000  nohead;
+    set arrow 7 from 1,0        to 3.4,0      nohead;
+    set arrow 8 from 3.5,0      to 4.6,0      nohead;
+    set xtics ("1" 1, "2" 2, "3" 3, "7" 4);
+    plot "/tmp/pbl_hist.dat" u 1:2 w boxes lw 3 lc rgb "#004444CC" title "Training",
+         "data/real_performance_vs_length.dat" using ($3<3.5 ? $3 : $3-3):($4+150) w points pointtype 25 ps 1.5 lw 3 lc rgb "#00115511" title "Deployment"
+
+        ;
+"""
+
+subprocess.call(["gnuplot", "-e", gnuplot_cmd])
+
