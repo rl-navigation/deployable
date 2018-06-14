@@ -219,7 +219,7 @@ if DO_SIMULATION:
                         lr            = 1e-4,
                         ent_weight    = 1e-1)
 
-    ckpt = torch.load("checkpoints/wintermute1528108143.35_frames_observed896006400")
+    ckpt = torch.load("checkpoints/wintermute1528108143.35")
     agent.load_state_dict(ckpt["agent.state_dict"])
 
     print("Running the agent on this start/goal pair")

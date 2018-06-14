@@ -50,7 +50,7 @@ def load_vision(vision_init):
     if vision_init.lower() == "untrained": model = models.resnet18(pretrained=False)
     if vision_init.lower() == "places365":
         model = models.resnet18(pretrained=False, num_classes=365)
-        model_file = 'pretrained/resnet18_places365.pth.tar'
+        model_file = 'data/resnet18_places365.pth.tar'
         checkpoint = torch.load(model_file, map_location=lambda storage, loc: storage)
         state_dict = {str.replace(k, 'module.',''): v for k,v in checkpoint['state_dict'].items()}
         model.load_state_dict(state_dict)
