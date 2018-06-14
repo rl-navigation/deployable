@@ -44,8 +44,11 @@ This animation shows one frame for each of the 2099 discrete locations in the da
 <h2>Experiment Videos</h2>
 
 </center>
-The following animations show one in every 60 frames of the deployment trajectories. This equates to approximately one frame per meter at maximum driving speed.
-Below each animation is a plot of the trajectory taken at deployment time compared against the optimal trajectory and the trajectory the agent executes on the training data.
+The following animations show one in every 60 frames of the deployment
+trajectories. This equates to approximately one frame per meter at maximum
+driving speed.  Below each animation is a plot of the trajectory taken at
+deployment time compared against the optimal trajectory and the trajectory the
+agent executes on the training data.
 <center>
 
 <h4>Trajectory 1 (successful)</h4>
